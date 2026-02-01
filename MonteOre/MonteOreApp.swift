@@ -1537,7 +1537,7 @@ struct NoteView: View {
     private var projectNameColor: Color {
         if let lid = project.labelID,
            let hex = projectManager.labels.first(where: {
-             $0.id == lid })?.color {
+            $0.id == lid })?.color {
             return Color(hex: hex)
         }
         return .black
@@ -1628,7 +1628,7 @@ struct NoteView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if let lid = project.labelID,
                            let lab = projectManager.labels.first(where: {
-                             $0.id == lid }) {
+                            $0.id == lid }) {
                             HStack(spacing: 8) {
                                 Text(lab.title)
                                     .font(.headline)
@@ -1718,8 +1718,8 @@ struct NoteView: View {
                                 isFullscreenEdit.toggle()
                             }) {
                                 Image(systemName: isFullscreenEdit
-                                    ? "arrow.down.right.and.arrow.up.left"
-                                    : "arrow.up.left.and.arrow.down.right")
+                                      ? "arrow.down.right.and.arrow.up.left"
+                                      : "arrow.up.left.and.arrow.down.right")
                                     .font(.title2)
                                     .foregroundColor(.blue)
                             }
@@ -1738,12 +1738,14 @@ struct NoteView: View {
                         }
 
                         if isFullscreenEdit {
-                            // ──── FULLSCREEN (zoomed) view ──── ALL'INTERNO DELLA PROCEDURA DI MODIFICA DELLE RIGHE DI UNA NOTA 
-
+                            // ──── FULLSCREEN (zoomed) view ────
+                            // MODIFICA QUI: ScrollView 2D per muovere tutto il blocco
+                            
                             ScrollViewReader { fullProxy in
-                                ScrollView {
-                                    VStack(spacing: 12) {
+                                ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                                    VStack(alignment: .leading, spacing: 12) {
                                         ForEach($editedRows) { $row in
+                                            // Rimosso ScrollView(.horizontal) interno
                                             HStack(spacing: 0) {
                                                 // Calendar button
                                                 Button(action: {
@@ -1757,36 +1759,37 @@ struct NoteView: View {
                                                 .buttonStyle(PlainButtonStyle())
                                                 .padding(.leading, 4)
 
-                                                // Horizontally scrollable row content
-                                                ScrollView(.horizontal, showsIndicators: true) {
-                                                    HStack(spacing: 8) {
-                                                        TextField("Giorno", text: $row.giorno)
-                                                            .font(.system(size: 16))
-                                                            .frame(width: 160, height: 100)
-                                                            .padding(.horizontal, 4)
+                                                // --- Campi (non scrollabili singolarmente ora) ---
 
-                                                        Divider().frame(height: 100).background(Color.black)
+                                                // Giorno
+                                                TextField("Giorno", text: $row.giorno)
+                                                    .font(.system(size: 16))
+                                                    .frame(width: 160, height: 100)
+                                                    .padding(.horizontal, 4)
 
-                                                        TextEditor(text: $row.orari)
-                                                            .font(.system(size: 16))
-                                                            .frame(width: 140, height: 100)
-                                                            .padding(.horizontal, 4)
+                                                Divider().frame(height: 100).background(Color.black)
 
-                                                        Divider().frame(height: 100).background(Color.black)
+                                                // Orari
+                                                TextEditor(text: $row.orari)
+                                                    .font(.system(size: 16))
+                                                    .frame(width: 140, height: 100)
+                                                    .padding(.horizontal, 4)
 
-                                                        Text(row.totalTimeString)
-                                                            .font(.system(size: 16))
-                                                            .frame(width: 80, height: 100)
+                                                Divider().frame(height: 100).background(Color.black)
 
-                                                        Divider().frame(height: 100).background(Color.black)
+                                                // Totale
+                                                Text(row.totalTimeString)
+                                                    .font(.system(size: 16))
+                                                    .frame(width: 80, height: 100)
 
-                                                        TextField("Note", text: $row.note)
-                                                            .font(.system(size: 16))
-                                                            .frame(width: 200, height: 100)
-                                                            .padding(.horizontal, 4)
-                                                    }
-                                                }
+                                                Divider().frame(height: 100).background(Color.black)
 
+                                                // Note - MODIFICATO: Width 300 fissa e TextEditor per andare a capo
+                                                TextEditor(text: $row.note)
+                                                    .font(.system(size: 16))
+                                                    .frame(width: 300, height: 100)
+                                                    .padding(.horizontal, 4)
+                                                
                                                 // Delete button
                                                 Button(action: {
                                                     if let i = editedRows.firstIndex(where: { $0.id == row.id }) {
@@ -1823,21 +1826,21 @@ struct NoteView: View {
                                     }
                                 }
                                 .onChange(of: project.id) { _, _ in
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if let lastId = editedRows.last?.id {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    fullProxy.scrollTo(lastId, anchor: .bottom)
-                }
-            }
-        }
-    }
-    .onChange(of: scrollTrigger) { _, _ in
-    if let lastId = editedRows.last?.id {
-        withAnimation(.easeOut(duration: 0.3)) {
-            fullProxy.scrollTo(lastId, anchor: .bottom)
-        }
-    }
-}
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        if let lastId = editedRows.last?.id {
+                                            withAnimation(.easeOut(duration: 0.3)) {
+                                                fullProxy.scrollTo(lastId, anchor: .bottom)
+                                            }
+                                        }
+                                    }
+                                }
+                                .onChange(of: scrollTrigger) { _, _ in
+                                    if let lastId = editedRows.last?.id {
+                                        withAnimation(.easeOut(duration: 0.3)) {
+                                            fullProxy.scrollTo(lastId, anchor: .bottom)
+                                        }
+                                    }
+                                }
                             }
                             // Attach calendar overlay to fullscreen ScrollView
                             .overlay(alignment: .topLeading) {
@@ -1845,7 +1848,7 @@ struct NoteView: View {
                             }
 
                         } else {
-                            // ──── COMPACT (default) view — original layout ──── ALL'INTERNO DELLA PROCEDURA DI MODIFICA DELLE RIGHE DI UNA NOTA 
+                            // ──── COMPACT (default) view — original layout ──── ALL'INTERNO DELLA PROCEDURA DI MODIFICA DELLE RIGHE DI UNA NOTA
                             ScrollViewReader { compactProxy in
                                 ScrollView {
                                     VStack(spacing: 8) {
@@ -1912,21 +1915,21 @@ struct NoteView: View {
                                     }
                                 }
                                 .onChange(of: project.id) { _, _ in
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if let lastId = editedRows.last?.id {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    compactProxy.scrollTo(lastId, anchor: .bottom)
-                }
-            }
-        }
-    }
-    .onChange(of: scrollTrigger) { _, _ in
-    if let lastId = editedRows.last?.id {
-        withAnimation(.easeOut(duration: 0.3)) {
-            compactProxy.scrollTo(lastId, anchor: .bottom)
-        }
-    }
-}
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        if let lastId = editedRows.last?.id {
+                                            withAnimation(.easeOut(duration: 0.3)) {
+                                                compactProxy.scrollTo(lastId, anchor: .bottom)
+                                            }
+                                        }
+                                    }
+                                }
+                                .onChange(of: scrollTrigger) { _, _ in
+                                    if let lastId = editedRows.last?.id {
+                                        withAnimation(.easeOut(duration: 0.3)) {
+                                            compactProxy.scrollTo(lastId, anchor: .bottom)
+                                        }
+                                    }
+                                }
                             }
                             // Attach calendar overlay to compact ScrollView
                             .overlay(alignment: .topLeading) {
