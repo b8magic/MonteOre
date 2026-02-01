@@ -1,4 +1,4 @@
-//4.3.4 TOP //salva export csv divisi in etichette - estetica bella
+//4.5 TOP //aggiunti icona calendario, toggle, filtri, maximise view, etc. controllare se salva export csv divisi in etichette - estetica bella come prometteca di fare la 4.3.4. Infine, devo notare che questo codice si basa sulla 4.4 che però non ho conservato, quindi non so cos'altro avevo fatto nella 4.4 nè se tale features (4.3.4->4.4) sono rimaste, ma sperabilmente si
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
@@ -27,13 +27,28 @@ extension Color {
                             int >> 8 & 0xFF,
                             int & 0xFF)
         default:
+            // ← AGGIUNTO: fallback sicuro
             (a, r, g, b) = (255, 0, 0, 0)
+            print("⚠️ Invalid hex color: \(hex)")
         }
+        
+        // ← AGGIUNTO: verifica che i valori siano validi
+        let red = Double(r) / 255.0
+        let green = Double(g) / 255.0
+        let blue = Double(b) / 255.0
+        let opacity = Double(a) / 255.0
+        
+        guard red.isFinite, green.isFinite, blue.isFinite, opacity.isFinite else {
+            print("⚠️ NaN detected in color calculation!")
+            self.init(.sRGB, red: 0, green: 0, blue: 0, opacity: 1)
+            return
+        }
+        
         self.init(.sRGB,
-                  red:   Double(r)/255,
-                  green: Double(g)/255,
-                  blue:  Double(b)/255,
-                  opacity: Double(a)/255)
+                  red: red,
+                  green: green,
+                  blue: blue,
+                  opacity: opacity)
     }
 }
 
@@ -189,6 +204,34 @@ class ProjectManager: ObservableObject {
         }
     }
 
+    /// Toggle sezione Mensilità Passate (salvato e in backup JSON)
+    @Published var pastMonthsVisible: Bool = true {
+        didSet {
+            UserDefaults.standard.set(pastMonthsVisible, forKey: "pastMonthsVisible")
+        }
+    }
+    /// Anni selezionati per filtro Mensilità Passate (1-99 → 2001-2099, salvato e in backup JSON)
+    @Published var selectedBackupYears: Set<Int> = [] {
+        didSet {
+            let arr = Array(selectedBackupYears).map { String($0) }
+            UserDefaults.standard.set(arr, forKey: "selectedBackupYears")
+        }
+    }
+    /// Etichette visibili in Mensilità Passate (vuoto = tutte; salvato e in backup JSON)
+    @Published var visibleBackupLabelIDs: Set<UUID> = [] {
+        didSet {
+            let arr = visibleBackupLabelIDs.map { $0.uuidString }
+            UserDefaults.standard.set(arr, forKey: "visibleBackupLabelIDs")
+        }
+    }
+    /// Etichette visibili in Progetti Correnti (vuoto = tutte; salvato e in backup JSON)
+    @Published var visibleCurrentLabelIDs: Set<UUID> = [] {
+        didSet {
+            let arr = visibleCurrentLabelIDs.map { $0.uuidString }
+            UserDefaults.standard.set(arr, forKey: "visibleCurrentLabelIDs")
+        }
+    }
+
     let projectsFileName    = "projects.json"
     let backupOrderFileName = "backupOrder.json"
 
@@ -209,6 +252,17 @@ class ProjectManager: ObservableObject {
            let u = UUID(uuidString: s)
         {
             lockedBackupLabelID = u
+        }
+
+        pastMonthsVisible = UserDefaults.standard.object(forKey: "pastMonthsVisible") as? Bool ?? true
+        if let arr = UserDefaults.standard.array(forKey: "selectedBackupYears") as? [String] {
+            selectedBackupYears = Set(arr.compactMap { Int($0) })
+        }
+        if let arr = UserDefaults.standard.array(forKey: "visibleBackupLabelIDs") as? [String] {
+            visibleBackupLabelIDs = Set(arr.compactMap { UUID(uuidString: $0) })
+        }
+        if let arr = UserDefaults.standard.array(forKey: "visibleCurrentLabelIDs") as? [String] {
+            visibleCurrentLabelIDs = Set(arr.compactMap { UUID(uuidString: $0) })
         }
 
         if let lastId = UserDefaults.standard.string(
@@ -428,6 +482,8 @@ class ProjectManager: ObservableObject {
     func addLabel(title: String, color: String) {
         let l = ProjectLabel(title: title, color: color)
         labels.append(l)
+        visibleBackupLabelIDs.insert(l.id)
+        visibleCurrentLabelIDs.insert(l.id)
         saveLabels()
         cleanupEmptyLock()
         objectWillChange.send()
@@ -506,6 +562,10 @@ class ProjectManager: ObservableObject {
         let labels: [ProjectLabel]
         let lockedLabelID: String?
         let lockedBackupLabelID: String?
+        let pastMonthsVisible: Bool?
+        let selectedBackupYears: [Int]?
+        let visibleBackupLabelIDs: [String]?
+        let visibleCurrentLabelIDs: [String]?
     }
     func getExportURL() -> URL? {
         let d = ExportData(
@@ -513,7 +573,11 @@ class ProjectManager: ObservableObject {
           backupProjects: backupProjects,
           labels: labels,
           lockedLabelID: lockedLabelID?.uuidString,
-          lockedBackupLabelID: lockedBackupLabelID?.uuidString)
+          lockedBackupLabelID: lockedBackupLabelID?.uuidString,
+          pastMonthsVisible: pastMonthsVisible,
+          selectedBackupYears: Array(selectedBackupYears),
+          visibleBackupLabelIDs: visibleBackupLabelIDs.map { $0.uuidString },
+          visibleCurrentLabelIDs: visibleCurrentLabelIDs.map { $0.uuidString })
         if let data = try? JSONEncoder().encode(d) {
             let url = FileManager.default.temporaryDirectory
                       .appendingPathComponent("MonteOreExport.json")
@@ -583,24 +647,76 @@ class ProjectManager: ObservableObject {
     }
 
     // MARK: Display Helpers
+    /// Estrae anno da titolo backup: ultimo numero 1-99 nel titolo → 2001-2099
+    static func yearFromBackupTitle(_ name: String) -> Int? {
+        var lastYear: Int? = nil
+        var num = 0
+        var inNumber = false
+        for c in name + " " {
+            if c.isNumber {
+                inNumber = true
+                num = num * 10 + (Int(String(c)) ?? 0)
+            } else {
+                if inNumber && num >= 1 && num <= 99 { lastYear = 2000 + num }
+                inNumber = false
+                num = 0
+            }
+        }
+        return lastYear
+    }
+    /// Anni presenti nei titoli delle mensilità passate (per filtro Anni mostrati)
+    func availableBackupYears() -> [Int] {
+        var years: Set<Int> = []
+        for p in backupProjects {
+            if let y = Self.yearFromBackupTitle(p.name) { years.insert(y) }
+        }
+        return years.sorted()
+    }
+
     func displayedCurrentProjects() -> [Project] {
+        let visible = visibleCurrentLabelIDs
         var list: [Project] = []
         list.append(contentsOf: projects.filter { $0.labelID == nil })
         for label in labels {
-            list.append(contentsOf: projects.filter {
-              $0.labelID == label.id })
+            if visible.isEmpty || visible.contains(label.id) {
+                list.append(contentsOf: projects.filter { $0.labelID == label.id })
+            }
         }
         return list
     }
     func displayedBackupProjects() -> [Project] {
-        var list: [Project] = []
-        list.append(contentsOf: backupProjects.filter { $0.labelID == nil })
-        for label in labels {
-            list.append(contentsOf: backupProjects.filter {
-              $0.labelID == label.id })
+    guard pastMonthsVisible else { return [] }
+    let years = selectedBackupYears
+    let visible = visibleBackupLabelIDs
+    
+    func include(_ p: Project) -> Bool {
+        // Se selectedBackupYears è vuoto, mostra tutto
+        // Se non è vuoto, mostra solo se il progetto ha un anno valido E è nella selezione
+        let yearOk: Bool
+        if years.isEmpty {
+            yearOk = true
+        } else {
+            if let year = Self.yearFromBackupTitle(p.name) {
+                yearOk = years.contains(year)
+            } else {
+                // Progetti senza numero nel nome → mostra sempre
+                yearOk = true
+            }
         }
-        return list
+        
+        let labelOk = p.labelID == nil || visible.isEmpty || visible.contains(p.labelID!)
+        return yearOk && labelOk
     }
+    
+    var list: [Project] = []
+    list.append(contentsOf: backupProjects.filter { $0.labelID == nil && include($0) })
+    for label in labels {
+        if visible.isEmpty || visible.contains(label.id) {
+            list.append(contentsOf: backupProjects.filter { $0.labelID == label.id && include($0) })
+        }
+    }
+    return list
+}
 
     // MARK: Helpers
     func postCycleNotification() {
@@ -917,58 +1033,85 @@ struct LabelHeaderView: View {
     let label: ProjectLabel
     @ObservedObject var projectManager: ProjectManager
     var isBackup = false
+    var onCreateWithLabel: (() -> Void)? = nil
 
     @State private var isTargeted = false
+
+    private var hasInSection: Bool {
+        isBackup
+            ? projectManager.backupProjects.contains(where: { $0.labelID == label.id })
+            : projectManager.projects.contains(where: { $0.labelID == label.id })
+    }
+
+    private var isLocked: Bool {
+        isBackup
+            ? (projectManager.lockedBackupLabelID == label.id)
+            : (projectManager.lockedLabelID == label.id)
+    }
+
+    @ViewBuilder
+private var labelTitleView: some View {
+    if !isBackup, let onCreate = onCreateWithLabel {
+        Button(action: onCreate) {
+            Text(label.title)
+                .font(.headline)
+                .underline()
+                .foregroundColor(Color(hex: label.color))
+                .frame(minWidth: 50) // ← AGGIUNTO: dimensione minima
+        }
+        .buttonStyle(PlainButtonStyle())
+    } else {
+        Text(label.title)
+            .font(.headline)
+            .underline()
+            .foregroundColor(Color(hex: label.color))
+            .frame(minWidth: 50) // ← AGGIUNTO: dimensione minima
+    }
+}
+
+    @ViewBuilder
+    private var lockButtonView: some View {
+        if hasInSection {
+            Button(action: toggleLock) {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                    .foregroundColor(.black)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func toggleLock() {
+        if isBackup {
+            if projectManager.lockedBackupLabelID == label.id {
+                projectManager.lockedBackupLabelID = nil
+            } else {
+                projectManager.lockedBackupLabelID = label.id
+                if let first = projectManager.backupProjects.first(where: { $0.labelID == label.id }) {
+                    projectManager.currentProject = first
+                }
+            }
+        } else {
+            if projectManager.lockedLabelID == label.id {
+                projectManager.lockedLabelID = nil
+            } else {
+                projectManager.lockedLabelID = label.id
+                if let first = projectManager.projects.first(where: { $0.labelID == label.id }) {
+                    projectManager.currentProject = first
+                }
+            }
+        }
+        projectManager.cleanupEmptyLock()
+    }
 
     var body: some View {
         HStack {
             Circle()
                 .fill(Color(hex: label.color))
                 .frame(width: 16, height: 16)
-            Text(label.title)
-                .font(.headline)
-                .underline()
-                .foregroundColor(Color(hex: label.color))
+            labelTitleView
             Spacer()
-
-            let hasInSection = isBackup
-                ? projectManager.backupProjects.contains(where: { $0.labelID == label.id })
-                : projectManager.projects.contains(where: { $0.labelID == label.id })
-
-            if hasInSection {
-                Button(action: {
-                    if isBackup {
-                        if projectManager.lockedBackupLabelID == label.id {
-                            projectManager.lockedBackupLabelID = nil
-                        } else {
-                            projectManager.lockedBackupLabelID = label.id
-                            if let first = projectManager.backupProjects.first(where: { $0.labelID == label.id }) {
-                                projectManager.currentProject = first
-                            }
-                        }
-                    } else {
-                        if projectManager.lockedLabelID == label.id {
-                            projectManager.lockedLabelID = nil
-                        } else {
-                            projectManager.lockedLabelID = label.id
-                            if let first = projectManager.projects.first(where: { $0.labelID == label.id }) {
-                                projectManager.currentProject = first
-                            }
-                        }
-                    }
-                    projectManager.cleanupEmptyLock()
-                }) {
-                    Image(systemName:
-                          (isBackup
-                           ? (projectManager.lockedBackupLabelID == label.id)
-                           : (projectManager.lockedLabelID       == label.id))
-                          ? "lock.fill" : "lock.open"
-                    )
-                    .foregroundColor(.black)
-                }
-                .buttonStyle(PlainButtonStyle())
-                .contentShape(Rectangle())
-            }
+            lockButtonView
         }
         .padding(.vertical, 8)
         .background(isTargeted ? Color.blue.opacity(0.2) : Color.clear)
@@ -997,6 +1140,49 @@ struct LabelHeaderView: View {
             }
             return true
         }
+    }
+}
+
+// MARK: - LabelFramePreferenceKey
+struct LabelFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
+// MARK: - BubbleView
+struct BubbleView: View {
+    let label: ProjectLabel
+    let labelFrame: CGRect
+    let onTap: () -> Void
+    
+    var body: some View {
+        GeometryReader { geo in
+            Button(action: onTap) {
+                HStack(alignment: .top, spacing: 6) {
+                    Text("Crea nuovo progetto con etichetta")
+                        .font(.caption)
+                    Text(label.title)
+                        .foregroundColor(Color(hex: label.color))
+                        .bold()
+                        .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.gray.opacity(0.95))
+                .cornerRadius(10)
+                .shadow(color: Color.black.opacity(0.3), radius: 8)
+                .fixedSize()
+            }
+            .buttonStyle(PlainButtonStyle())
+            .allowsHitTesting(true)
+            .position(
+                x: min(max(labelFrame.midX, geo.size.width * 0.3), geo.size.width * 0.7),
+                y: labelFrame.minY - 30
+            )
+        }
+        .allowsHitTesting(true)
     }
 }
 
@@ -1272,13 +1458,81 @@ struct ChangeLabelColorDirectSheet: View {
     }
 }
 
+// MARK: - RowDatePickerSheet (full sheet, kept for fallback)
+struct RowDatePickerSheet: View {
+    @Binding var date: Date
+    var onConfirm: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        NavigationView {
+            VStack {
+                DatePicker("Data", selection: $date, displayedComponents: .date)
+                    .datePickerStyle(.graphical)
+                    .padding()
+                Spacer()
+            }
+            .navigationTitle("Scegli data")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") { onConfirm() }
+                        .foregroundColor(.blue)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - RowDatePickerPopover (piccolo calendario grigio semitrasparente)
+struct RowDatePickerPopover: View {
+    @Binding var date: Date
+    var onConfirm: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            DatePicker("Data", selection: $date, displayedComponents: .date)
+                .datePickerStyle(.compact)
+                .labelsHidden()
+            Button("OK") {
+                onConfirm()
+            }
+            .font(.subheadline)
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(Color.blue)
+            .cornerRadius(8)
+        }
+        .padding(12)
+        .frame(width: 220)
+        .background(Color.gray.opacity(0.25))
+        .cornerRadius(12)
+    }
+}
+
 // MARK: - NoteView
 struct NoteView: View {
     @ObservedObject var project: Project
     var projectManager: ProjectManager
-
+    @Binding var isEditingNote: Bool
+    @Binding var scrollTrigger: UUID
+    
     @State private var editMode = false
     @State private var editedRows: [NoteRow] = []
+    @State private var isFullscreenEdit = false
+
+    // — Calendar popover state (restored from old version) —
+    @State private var rowDatePickerRowId: UUID? = nil
+    @State private var rowDatePickerDate: Date = Date()
+
+    // — Scroll state —
+    // True on the frame immediately after entering edit mode → triggers scroll-to-bottom
+    @State private var shouldScrollToBottom = false
+    // Remembers which row was last visible so toggling zoom preserves position
+    @State private var lastVisibleRowId: UUID? = nil
 
     private var projectNameColor: Color {
         if let lid = project.labelID,
@@ -1287,6 +1541,77 @@ struct NoteView: View {
             return Color(hex: hex)
         }
         return .black
+    }
+
+    // MARK: - Shared calendar overlay builder
+    // Reusable overlay that shows the compact date picker popover,
+    // applied identically to both the fullscreen and compact ScrollViews.
+    @ViewBuilder
+    private func calendarOverlay() -> some View {
+        if rowDatePickerRowId != nil {
+            Color.black.opacity(0.001)  // Overlay invisibile ma intercettabile
+                .edgesIgnoringSafeArea(.all)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Tap ovunque → chiudi calendario
+                    rowDatePickerRowId = nil
+                }
+                .overlay(alignment: .topLeading) {
+                    VStack(spacing: 8) {
+                        DatePicker(
+                            "",
+                            selection: Binding(
+                                get: { rowDatePickerDate },
+                                set: { newDate in
+                                    rowDatePickerDate = newDate
+                                    applyDate(newDate)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                        rowDatePickerRowId = nil
+                                    }
+                                }
+                            ),
+                            displayedComponents: .date
+                        )
+                        .datePickerStyle(.compact)
+                        .environment(\.locale, Locale(identifier: "it_IT"))
+                        .labelsHidden()
+                        .accentColor(.blue)
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.gray.opacity(0.95))
+                            .shadow(color: Color.black.opacity(0.3), radius: 8)
+                    )
+                    .frame(width: 280)
+                    .padding(.top, 50)
+                    .padding(.leading, 40)
+                    .onTapGesture {
+                        // Swallow taps on the calendar itself so it doesn't close
+                    }
+                }
+        }
+    }
+
+    // MARK: - Helper: open calendar for a row
+    private func openCalendar(for row: NoteRow) {
+        rowDatePickerRowId = row.id
+        if let d = project.dateFromGiorno(row.giorno) {
+            rowDatePickerDate = d
+        } else {
+            rowDatePickerDate = Date()
+        }
+    }
+
+    // MARK: - Helper: write formatted date back into the row
+    private func applyDate(_ date: Date) {
+        let fmt = DateFormatter()
+        fmt.locale     = Locale(identifier: "it_IT")
+        fmt.dateFormat = "EEEE dd/MM/yy"
+        guard let rid = rowDatePickerRowId,
+              let idx = editedRows.firstIndex(where: { $0.id == rid })
+        else { return }
+        editedRows[idx].giorno = fmt.string(from: date).capitalized
     }
 
     var body: some View {
@@ -1298,6 +1623,7 @@ struct NoteView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
+                // ─── Header: label badge + project name + edit controls ───
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         if let lid = project.labelID,
@@ -1321,30 +1647,24 @@ struct NoteView: View {
                             .bold()
                             .underline(true, color: projectNameColor)
                             .foregroundColor(.black)
-
                     }
                     Spacer()
                     if editMode {
                         VStack {
                             Button(action: {
+                                // Filter empty rows
                                 var rows = editedRows.filter {
                                     !(
-                                      $0.giorno.trimmingCharacters(
-                                        in: .whitespaces).isEmpty
-                                      && $0.orari.trimmingCharacters(
-                                        in: .whitespaces).isEmpty
-                                      && $0.note.trimmingCharacters(
-                                        in: .whitespaces).isEmpty
+                                      $0.giorno.trimmingCharacters(in: .whitespaces).isEmpty
+                                      && $0.orari.trimmingCharacters(in: .whitespaces).isEmpty
+                                      && $0.note.trimmingCharacters(in: .whitespaces).isEmpty
                                     )
                                 }
+                                // Sort chronologically
                                 rows.sort {
-                                    guard let d1 =
-                                      project.dateFromGiorno($0.giorno),
-                                          let d2 =
-                                      project.dateFromGiorno($1.giorno)
-                                    else {
-                                        return $0.giorno < $1.giorno
-                                    }
+                                    guard let d1 = project.dateFromGiorno($0.giorno),
+                                          let d2 = project.dateFromGiorno($1.giorno)
+                                    else { return $0.giorno < $1.giorno }
                                     return d1 < d2
                                 }
                                 project.noteRows = rows
@@ -1356,13 +1676,18 @@ struct NoteView: View {
                                     projectManager.saveProjects()
                                 }
                                 projectManager.objectWillChange.send()
+                                rowDatePickerRowId = nil          // chiudi calendario
                                 editMode = false
+                                isFullscreenEdit = false
                             }) {
                                 Text("Salva").foregroundColor(.blue)
                             }
                             .contentShape(Rectangle())
+
                             Button(action: {
+                                rowDatePickerRowId = nil          // chiudi calendario
                                 editMode = false
+                                isFullscreenEdit = false
                             }) {
                                 Text("Annulla").foregroundColor(.red)
                             }
@@ -1373,6 +1698,7 @@ struct NoteView: View {
                         Button(action: {
                             editedRows = project.noteRows
                             editMode = true
+                            shouldScrollToBottom = true   // ← scroll to last row once laid out
                         }) {
                             Text("Modifica")
                                 .font(.body)
@@ -1383,10 +1709,24 @@ struct NoteView: View {
                 }
                 .padding(.bottom, 5)
 
+                // ─── Edit mode ───
                 if editMode {
                     VStack {
+                        // Toolbar: fullscreen toggle + add row
                         HStack {
+                            Button(action: {
+                                isFullscreenEdit.toggle()
+                            }) {
+                                Image(systemName: isFullscreenEdit
+                                    ? "arrow.down.right.and.arrow.up.left"
+                                    : "arrow.up.left.and.arrow.down.right")
+                                    .font(.title2)
+                                    .foregroundColor(.blue)
+                            }
+                            .contentShape(Rectangle())
+
                             Spacer()
+
                             Button(action: {
                                 editedRows.append(
                                   NoteRow(giorno: "", orari: "", note: ""))
@@ -1396,63 +1736,249 @@ struct NoteView: View {
                             }
                             .padding(.trailing)
                         }
+
+                        if isFullscreenEdit {
+                            // ──── FULLSCREEN (zoomed) view ──── ALL'INTERNO DELLA PROCEDURA DI MODIFICA DELLE RIGHE DI UNA NOTA 
+
+                            ScrollViewReader { fullProxy in
+                                ScrollView {
+                                    VStack(spacing: 12) {
+                                        ForEach($editedRows) { $row in
+                                            HStack(spacing: 0) {
+                                                // Calendar button
+                                                Button(action: {
+                                                    openCalendar(for: row)
+                                                }) {
+                                                    Image(systemName: "calendar")
+                                                        .font(.title2)
+                                                        .foregroundColor(.blue)
+                                                        .frame(width: 32, height: 100)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
+                                                .padding(.leading, 4)
+
+                                                // Horizontally scrollable row content
+                                                ScrollView(.horizontal, showsIndicators: true) {
+                                                    HStack(spacing: 8) {
+                                                        TextField("Giorno", text: $row.giorno)
+                                                            .font(.system(size: 16))
+                                                            .frame(width: 160, height: 100)
+                                                            .padding(.horizontal, 4)
+
+                                                        Divider().frame(height: 100).background(Color.black)
+
+                                                        TextEditor(text: $row.orari)
+                                                            .font(.system(size: 16))
+                                                            .frame(width: 140, height: 100)
+                                                            .padding(.horizontal, 4)
+
+                                                        Divider().frame(height: 100).background(Color.black)
+
+                                                        Text(row.totalTimeString)
+                                                            .font(.system(size: 16))
+                                                            .frame(width: 80, height: 100)
+
+                                                        Divider().frame(height: 100).background(Color.black)
+
+                                                        TextField("Note", text: $row.note)
+                                                            .font(.system(size: 16))
+                                                            .frame(width: 200, height: 100)
+                                                            .padding(.horizontal, 4)
+                                                    }
+                                                }
+
+                                                // Delete button
+                                                Button(action: {
+                                                    if let i = editedRows.firstIndex(where: { $0.id == row.id }) {
+                                                        editedRows.remove(at: i)
+                                                    }
+                                                }) {
+                                                    Image(systemName: "minus.circle.fill")
+                                                        .font(.title2)
+                                                        .foregroundColor(.red)
+                                                        .frame(width: 32, height: 100)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
+                                                .padding(.trailing, 4)
+                                            }
+                                            .padding(.vertical, 4)
+                                            .background(Color.white.opacity(0.6))
+                                            .cornerRadius(8)
+                                            .id(row.id)
+                                            .onAppear { lastVisibleRowId = row.id }
+                                        }
+                                    }
+                                    .padding(.horizontal, 4)
+                                }
+                                .onAppear {
+                                    DispatchQueue.main.async {
+                                        if shouldScrollToBottom {
+                                            if let lastId = editedRows.last?.id {
+                                                fullProxy.scrollTo(lastId, anchor: .bottom)
+                                            }
+                                            shouldScrollToBottom = false
+                                        } else if let lastId = editedRows.last?.id {
+                                            fullProxy.scrollTo(lastId, anchor: .bottom)  // (or compactProxy)
+                                        }
+                                    }
+                                }
+                                .onChange(of: project.id) { _, _ in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if let lastId = editedRows.last?.id {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    fullProxy.scrollTo(lastId, anchor: .bottom)
+                }
+            }
+        }
+    }
+    .onChange(of: scrollTrigger) { _, _ in
+    if let lastId = editedRows.last?.id {
+        withAnimation(.easeOut(duration: 0.3)) {
+            fullProxy.scrollTo(lastId, anchor: .bottom)
+        }
+    }
+}
+                            }
+                            // Attach calendar overlay to fullscreen ScrollView
+                            .overlay(alignment: .topLeading) {
+                                calendarOverlay()
+                            }
+
+                        } else {
+                            // ──── COMPACT (default) view — original layout ──── ALL'INTERNO DELLA PROCEDURA DI MODIFICA DELLE RIGHE DI UNA NOTA 
+                            ScrollViewReader { compactProxy in
+                                ScrollView {
+                                    VStack(spacing: 8) {
+                                        ForEach($editedRows) { $row in
+                                            HStack(spacing: 8) {
+                                                // Calendar button
+                                                Button(action: {
+                                                    openCalendar(for: row)
+                                                }) {
+                                                    Image(systemName: "calendar")
+                                                        .font(.title2)
+                                                        .foregroundColor(.blue)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
+
+                                                TextField("Giorno", text: $row.giorno)
+                                                    .font(.system(size: 14))
+                                                    .frame(height: 60)
+                                                Divider().frame(height: 60)
+                                                    .background(Color.black)
+                                                TextEditor(text: $row.orari)
+                                                    .font(.system(size: 14))
+                                                    .frame(height: 60)
+                                                Divider().frame(height: 60)
+                                                    .background(Color.black)
+                                                Text(row.totalTimeString)
+                                                    .font(.system(size: 14))
+                                                    .frame(height: 60)
+                                                Divider().frame(height: 60)
+                                                    .background(Color.black)
+                                                TextField("Note", text: $row.note)
+                                                    .font(.system(size: 14))
+                                                    .frame(height: 60)
+
+                                                // Delete button
+                                                Button(action: {
+                                                    if let i = editedRows.firstIndex(where: { $0.id == row.id }) {
+                                                        editedRows.remove(at: i)
+                                                    }
+                                                }) {
+                                                    Image(systemName: "minus.circle.fill")
+                                                        .font(.title2)
+                                                        .foregroundColor(.red)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
+                                            }
+                                            .padding(.vertical, 4)
+                                            .id(row.id)
+                                            .onAppear { lastVisibleRowId = row.id }
+                                        }
+                                    }
+                                    .padding(.horizontal, 8)
+                                }
+                                .onAppear {
+                                    DispatchQueue.main.async {
+                                        if shouldScrollToBottom {
+                                            if let lastId = editedRows.last?.id {
+                                                compactProxy.scrollTo(lastId, anchor: .bottom)
+                                            }
+                                            shouldScrollToBottom = false
+                                        } else if let lastId = editedRows.last?.id {
+                                            compactProxy.scrollTo(lastId, anchor: .bottom)  // (or compactProxy)
+                                        }
+                                    }
+                                }
+                                .onChange(of: project.id) { _, _ in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if let lastId = editedRows.last?.id {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    compactProxy.scrollTo(lastId, anchor: .bottom)
+                }
+            }
+        }
+    }
+    .onChange(of: scrollTrigger) { _, _ in
+    if let lastId = editedRows.last?.id {
+        withAnimation(.easeOut(duration: 0.3)) {
+            compactProxy.scrollTo(lastId, anchor: .bottom)
+        }
+    }
+}
+                            }
+                            // Attach calendar overlay to compact ScrollView
+                            .overlay(alignment: .topLeading) {
+                                calendarOverlay()
+                            }
+                        }
+                    }
+
+                } else {
+    // ─── Read-only view ───
+    ScrollViewReader { readProxy in
                         ScrollView {
-                            VStack(spacing: 8) {
-                                ForEach($editedRows) { $row in
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(project.noteRows) { row in
                                     HStack(spacing: 8) {
-                                        TextField("Giorno", text: $row.giorno)
+                                        Text(row.giorno)
                                             .font(.system(size: 14))
-                                            .frame(height: 60)
+                                            .frame(minHeight: 60)
                                         Divider().frame(height: 60)
                                             .background(Color.black)
-                                        TextEditor(text: $row.orari)
+                                        Text(row.orari)
                                             .font(.system(size: 14))
-                                            .frame(height: 60)
+                                            .frame(minHeight: 60)
                                         Divider().frame(height: 60)
                                             .background(Color.black)
                                         Text(row.totalTimeString)
                                             .font(.system(size: 14))
-                                            .frame(height: 60)
+                                            .frame(minHeight: 60)
                                         Divider().frame(height: 60)
                                             .background(Color.black)
-                                        TextField("Note", text: $row.note)
+                                        Text(row.note)
                                             .font(.system(size: 14))
-                                            .frame(height: 60)
+                                            .frame(minHeight: 60)
                                     }
-                                    .padding(.vertical, 4)
+                                    .padding(.vertical, 2)
+                                    .id(row.id)
                                 }
                             }
                             .padding(.horizontal, 8)
                         }
-                    }
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(project.noteRows) { row in
-                                HStack(spacing: 8) {
-                                    Text(row.giorno)
-                                        .font(.system(size: 14))
-                                        .frame(minHeight: 60)
-                                    Divider().frame(height: 60)
-                                        .background(Color.black)
-                                    Text(row.orari)
-                                        .font(.system(size: 14))
-                                        .frame(minHeight: 60)
-                                    Divider().frame(height: 60)
-                                        .background(Color.black)
-                                    Text(row.totalTimeString)
-                                        .font(.system(size: 14))
-                                        .frame(minHeight: 60)
-                                    Divider().frame(height: 60)
-                                        .background(Color.black)
-                                    Text(row.note)
-                                        .font(.system(size: 14))
-                                        .frame(minHeight: 60)
-                                }
-                                .padding(.vertical, 2)
+                        .onChange(of: scrollTrigger) { _, _ in
+                            if let lastId = project.noteRows.last?.id {
+                                readProxy.scrollTo(lastId, anchor: .bottom)
                             }
                         }
-                        .padding(.horizontal, 8)
+                        .onChange(of: project.id) { _, _ in
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                if let lastId = project.noteRows.last?.id {
+                                    readProxy.scrollTo(lastId, anchor: .bottom)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1460,6 +1986,17 @@ struct NoteView: View {
         }
         .cornerRadius(25)
         .clipped()
+        .onChange(of: editMode) {
+            isEditingNote = editMode
+        }
+        .onChange(of: project.id) { _, _ in
+            if editMode {
+                editedRows = project.noteRows
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    scrollTrigger = UUID()
+                }
+            }
+        }
     }
 }
 
@@ -1677,6 +2214,185 @@ private struct ExportFile: Identifiable {
     var id: String { url.absoluteString }
 }
 
+// MARK: - Anni mostrati (Mensilità Passate)
+struct AnniMostratiSheet: View {
+    @ObservedObject var projectManager: ProjectManager
+    var onDismiss: () -> Void
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(projectManager.availableBackupYears(), id: \.self) { year in
+                    Button(action: {
+                        var set = projectManager.selectedBackupYears
+                        if set.contains(year) {
+                            set.remove(year)
+                        } else {
+                            set.insert(year)
+                        }
+                        projectManager.selectedBackupYears = set
+                    }) {
+                        HStack {
+                            Text(String(year))
+                            Spacer()
+                            if projectManager.selectedBackupYears.contains(year) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Anni mostrati")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fatto") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Etichette mostrate (Mensilità Passate o Progetti Correnti)
+struct EtichetteMostrateSheet: View {
+    @ObservedObject var projectManager: ProjectManager
+    var forBackup: Bool
+    var onDismiss: () -> Void
+
+    private func isVisible(_ label: ProjectLabel) -> Bool {
+        let set = forBackup ? projectManager.visibleBackupLabelIDs : projectManager.visibleCurrentLabelIDs
+        return set.isEmpty || set.contains(label.id)
+    }
+
+    private func toggle(_ label: ProjectLabel) {
+        if forBackup {
+            var set = projectManager.visibleBackupLabelIDs
+            if set.isEmpty {
+                set = Set(projectManager.labels.map { $0.id })
+            }
+            if set.contains(label.id) {
+                set.remove(label.id)
+            } else {
+                set.insert(label.id)
+            }
+            projectManager.visibleBackupLabelIDs = set
+        } else {
+            var set = projectManager.visibleCurrentLabelIDs
+            if set.isEmpty {
+                set = Set(projectManager.labels.map { $0.id })
+            }
+            if set.contains(label.id) {
+                set.remove(label.id)
+            } else {
+                set.insert(label.id)
+            }
+            projectManager.visibleCurrentLabelIDs = set
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(projectManager.labels) { label in
+                    Button(action: { toggle(label) }) {
+                        HStack {
+                            Circle()
+                                .fill(Color(hex: label.color))
+                                .frame(width: 20, height: 20)
+                            Text(label.title)
+                            Spacer()
+                            if isVisible(label) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Etichette mostrate")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fatto") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Crea progetto con etichetta
+struct CreateProjectWithLabelSheet: View {
+    @ObservedObject var projectManager: ProjectManager
+    let label: ProjectLabel
+    @Environment(\.presentationMode) var presentationMode
+    @State private var projectName = ""
+    @FocusState private var isTextFieldFocused: Bool  // ← AGGIUNTO
+
+    var body: some View {
+        VStack(spacing: 30) {
+            Text("Nuovo progetto con etichetta")
+                .font(.title2)
+                .padding(.top, 40)
+            
+            Text(label.title)
+                .font(.title)
+                .foregroundColor(Color(hex: label.color))
+                .bold()
+            
+            TextField("Nome progetto", text: $projectName)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .focused($isTextFieldFocused)  // ← AGGIUNTO
+                .disableAutocorrection(true)   // ← AGGIUNTO: riduce interazioni UIKit
+                .autocapitalization(.none)     // ← AGGIUNTO: riduce interazioni UIKit
+                .frame(minHeight: 44)          // ← AGGIUNTO: dimensione touch standard iOS
+                .padding(.horizontal, 30)
+            
+            Spacer()
+            
+            HStack(spacing: 20) {
+                Button("Annulla") {
+                    isTextFieldFocused = false  // ← rimuovi focus prima di chiudere
+                    presentationMode.wrappedValue.dismiss()
+                }
+                .font(.headline)
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.gray)
+                .cornerRadius(10)
+                
+                Button("CREA") {
+                    let trimmed = projectName.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty else { return }
+                    
+                    isTextFieldFocused = false  // ← rimuovi focus prima di chiudere
+                    
+                    projectManager.addProject(name: trimmed)
+                    if let p = projectManager.currentProject {
+                        p.labelID = label.id
+                        projectManager.saveProjects()
+                        projectManager.cleanupEmptyLock()
+                    }
+                    presentationMode.wrappedValue.dismiss()
+                }
+                .font(.headline)
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.green)
+                .cornerRadius(10)
+            }
+            .padding(.horizontal, 30)
+            .padding(.bottom, 40)
+        }
+        .onAppear {
+            // ← Attendi un frame prima di dare focus (migliora stabilità layout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isTextFieldFocused = true
+            }
+        }
+    }
+}
+
 struct ProjectManagerView: View {
     @ObservedObject var projectManager: ProjectManager
 
@@ -1700,15 +2416,30 @@ struct ProjectManagerView: View {
     @State private var exportFile: ExportFile? = nil
     @State private var csvPrewarmed = false
 
+    @State private var showAnniMostratiBackup = false
+    @State private var showEtichetteMostrateBackup = false
+    @State private var showEtichetteMostrateCurrent = false
+
+    //Stato per quando in gestione progetti correnti clicco sul titolo di un'etichetta
+    @State private var createProjectWithLabel: ProjectLabel? = nil
+
+
     var body: some View {
         NavigationView {
             VStack {
                 // ───────────────── LISTA PROGETTI ─────────────────
                 List {
                     Section(header:
-                        Text("Progetti Correnti")
-                            .font(.largeTitle).bold()
-                            .padding(.top, 10)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Progetti Correnti")
+                                .font(.largeTitle).bold()
+                                .padding(.top, 10)
+                            Button("Etichette mostrate") {
+                                showEtichetteMostrateCurrent = true
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.blue)
+                        }
                     ) {
                         let unl = projectManager.projects.filter { $0.labelID == nil }
                         if !unl.isEmpty {
@@ -1728,61 +2459,64 @@ struct ProjectManagerView: View {
                             }
                         }
                         ForEach(projectManager.labels) { lab in
-                            LabelHeaderView(
-                                label: lab,
-                                projectManager: projectManager
-                            )
-                            let grp = projectManager.projects.filter { $0.labelID == lab.id }
-                            if !grp.isEmpty {
-                                ForEach(grp) { p in
-                                    ProjectRowView(
-                                        project: p,
-                                        projectManager: projectManager,
-                                        editingProjects: editingProjects
-                                    )
-                                }
-                                .onMove { idx, off in
-                                    projectManager.moveProjects(
-                                        forLabel: lab.id,
-                                        indices: idx,
-                                        newOffset: off
-                                    )
+                            if projectManager.visibleCurrentLabelIDs.isEmpty || projectManager.visibleCurrentLabelIDs.contains(lab.id) {
+                                LabelHeaderView(
+                                    label: lab,
+                                    projectManager: projectManager,
+                                    isBackup: false,
+                                    onCreateWithLabel: {
+                                        createProjectWithLabel = lab
+                                    }
+                                )
+                                let grp = projectManager.projects.filter { $0.labelID == lab.id }
+                                if !grp.isEmpty {
+                                    ForEach(grp) { p in
+                                        ProjectRowView(
+                                            project: p,
+                                            projectManager: projectManager,
+                                            editingProjects: editingProjects
+                                        )
+                                    }
+                                    .onMove { idx, off in
+                                        projectManager.moveProjects(
+                                            forLabel: lab.id,
+                                            indices: idx,
+                                            newOffset: off
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
                     Section(header:
-                        Text("Mensilità Passate")
-                            .font(.largeTitle).bold()
-                            .padding(.top, 40)
-                    ) {
-                        let unl = projectManager.backupProjects.filter { $0.labelID == nil }
-                        if !unl.isEmpty {
-                            ForEach(unl) { p in
-                                ProjectRowView(
-                                    project: p,
-                                    projectManager: projectManager,
-                                    editingProjects: editingProjects
-                                )
-                            }
-                            .onMove { idx, off in
-                                projectManager.moveBackupProjects(
-                                    forLabel: nil,
-                                    indices: idx,
-                                    newOffset: off
-                                )
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Mensilità Passate")
+                                .font(.largeTitle).bold()
+                                .padding(.top, 40)
+                            HStack(spacing: 12) {
+                                Toggle("", isOn: Binding(
+                                    get: { projectManager.pastMonthsVisible },
+                                    set: { projectManager.pastMonthsVisible = $0 }
+                                ))
+                                    .labelsHidden()
+                                Button("Anni mostrati") {
+                                    showAnniMostratiBackup = true
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
+                                Button("Etichette mostrate") {
+                                    showEtichetteMostrateBackup = true
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
                             }
                         }
-                        ForEach(projectManager.labels) { lab in
-                            let grp = projectManager.backupProjects.filter { $0.labelID == lab.id }
-                            if !grp.isEmpty {
-                                LabelHeaderView(
-                                    label: lab,
-                                    projectManager: projectManager,
-                                    isBackup: true
-                                )
-                                ForEach(grp) { p in
+                    ) {
+                        if projectManager.pastMonthsVisible {
+                            let backupUnl = projectManager.displayedBackupProjects().filter { $0.labelID == nil }
+                            if !backupUnl.isEmpty {
+                                ForEach(backupUnl) { p in
                                     ProjectRowView(
                                         project: p,
                                         projectManager: projectManager,
@@ -1791,10 +2525,36 @@ struct ProjectManagerView: View {
                                 }
                                 .onMove { idx, off in
                                     projectManager.moveBackupProjects(
-                                        forLabel: lab.id,
+                                        forLabel: nil,
                                         indices: idx,
                                         newOffset: off
                                     )
+                                }
+                            }
+                            ForEach(projectManager.labels) { lab in
+                                if projectManager.visibleBackupLabelIDs.isEmpty || projectManager.visibleBackupLabelIDs.contains(lab.id) {
+                                    let grp = projectManager.displayedBackupProjects().filter { $0.labelID == lab.id }
+                                    if !grp.isEmpty {
+                                        LabelHeaderView(
+                                            label: lab,
+                                            projectManager: projectManager,
+                                            isBackup: true
+                                        )
+                                        ForEach(grp) { p in
+                                            ProjectRowView(
+                                                project: p,
+                                                projectManager: projectManager,
+                                                editingProjects: editingProjects
+                                            )
+                                        }
+                                        .onMove { idx, off in
+                                            projectManager.moveBackupProjects(
+                                                forLabel: lab.id,
+                                                indices: idx,
+                                                newOffset: off
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1802,7 +2562,7 @@ struct ProjectManagerView: View {
                 }
                 .listStyle(PlainListStyle())
                 .environment(\.editMode, $editMode)
-
+                
                 // ───────────── CREAZIONE PROGETTO & ETICHETTE ─────────────
                 HStack {
                     TextField("Nuovo progetto", text: $newProjectName)
@@ -1898,6 +2658,25 @@ struct ProjectManagerView: View {
             .sheet(isPresented: $showEtichette) {
                 LabelsManagerView(projectManager: projectManager)
             }
+            .sheet(isPresented: $showAnniMostratiBackup) {
+                AnniMostratiSheet(projectManager: projectManager) {
+                    showAnniMostratiBackup = false
+                }
+            }
+            .sheet(isPresented: $showEtichetteMostrateBackup) {
+                EtichetteMostrateSheet(projectManager: projectManager, forBackup: true) {
+                    showEtichetteMostrateBackup = false
+                }
+            }
+            .sheet(isPresented: $showEtichetteMostrateCurrent) {
+                EtichetteMostrateSheet(projectManager: projectManager, forBackup: false) {
+                    showEtichetteMostrateCurrent = false
+                }
+            }
+            .sheet(item: $createProjectWithLabel) { label in
+                CreateProjectWithLabelSheet(projectManager: projectManager, label: label)
+            }
+            
 
             // ───────────── DIALOG DI SCELTA EXPORT ─────────────
             .confirmationDialog("Esporta Monte Ore",
@@ -2003,6 +2782,10 @@ struct ProjectManagerView: View {
                             projectManager.labels         = pending.labels
                             projectManager.lockedLabelID       = pending.lockedLabelID.flatMap(UUID.init)
                             projectManager.lockedBackupLabelID = pending.lockedBackupLabelID.flatMap(UUID.init)
+                            if let v = pending.pastMonthsVisible { projectManager.pastMonthsVisible = v }
+                            if let y = pending.selectedBackupYears { projectManager.selectedBackupYears = Set(y) }
+                            if let vb = pending.visibleBackupLabelIDs { projectManager.visibleBackupLabelIDs = Set(vb.compactMap { UUID(uuidString: $0) }) }
+                            if let vc = pending.visibleCurrentLabelIDs { projectManager.visibleCurrentLabelIDs = Set(vc.compactMap { UUID(uuidString: $0) }) }
                             projectManager.currentProject = projectManager.projects.first
                             projectManager.saveLabels()
                             pendingImport = nil
@@ -2159,6 +2942,10 @@ struct ContentView: View {
     @State private var showManager  = false
     @State private var showNoSbatti = false
     @State private var showMedal    = false
+    @State private var isEditingNote = false
+
+    @State private var scrollTrigger = UUID()
+
     @AppStorage("medalAwarded") private var medalAwarded = false
 
     var body: some View {
@@ -2181,22 +2968,25 @@ struct ContentView: View {
                     } else {
                         if let proj = projectManager.currentProject {
                             NoteView(
-                              project: proj,
-                              projectManager: projectManager)
+                            project: proj,
+                            projectManager: projectManager,
+                            isEditingNote: $isEditingNote,
+                            scrollTrigger: $scrollTrigger)  // ← NUOVO binding
                             .frame(
-                              width: isLand ? geo.size.width
+                            width: isLand ? geo.size.width
                                             : geo.size.width - 40,
-                              height: isLand ? geo.size.height * 0.4
+                            height: isLand ? geo.size.height * 0.4
                                             : geo.size.height * 0.6)
                         }
                     }
 
                     // —— NEW: lock button + Pigia/Torna ——
+                    // —— NEW: lock button + Pigia/Torna ——
                     HStack(spacing: 20) {
                         // unlock button if showing a locked label (and only if labelled)
                         if let cur = projectManager.currentProject,
-                           let lid = cur.labelID,
-                           (projectManager.lockedLabelID == lid
+                        let lid = cur.labelID,
+                        (projectManager.lockedLabelID == lid
                             || projectManager.lockedBackupLabelID == lid)
                         {
                             Button(action: {
@@ -2212,10 +3002,11 @@ struct ContentView: View {
                                     .font(.title)
                                     .foregroundColor(.black)
                                     .frame(width: isLand ? 50 : 70,
-                                           height: isLand ? 50 : 70)
+                                        height: isLand ? 50 : 70)
                                     .background(Circle().fill(Color.white))
                             }
                             .contentShape(Rectangle())
+                            .disabled(isEditingAnyProject())  // ← NUOVO
                         }
 
                         ZStack {
@@ -2224,16 +3015,16 @@ struct ContentView: View {
                                     .font(.title2)
                                     .foregroundColor(.white)
                                     .frame(width: isLand ? 100 : 140,
-                                           height: isLand ? 100 : 140)
+                                        height: isLand ? 100 : 140)
                                     .background(Circle().fill(Color.black))
                             }
-                            .disabled(isBackup || projectManager.currentProject == nil)
+                            .disabled(isBackup || projectManager.currentProject == nil || isEditingAnyProject())  // ← MODIFICATO
 
                             if isBackup {
                                 Button(action: {
                                     if let lockedC = projectManager.lockedLabelID,
-                                       let first = projectManager.projects.first(
-                                         where: { $0.labelID == lockedC })
+                                    let first = projectManager.projects.first(
+                                        where: { $0.labelID == lockedC })
                                     {
                                         projectManager.currentProject = first
                                     } else {
@@ -2245,10 +3036,11 @@ struct ContentView: View {
                                         .multilineTextAlignment(.center)
                                         .foregroundColor(.black)
                                         .frame(width: isLand ? 100 : 140,
-                                               height: isLand ? 100 : 140)
+                                            height: isLand ? 100 : 140)
                                         .background(Circle().fill(Color(hex: "#54c0ff")))
                                 }
                                 .contentShape(Rectangle())
+                                .disabled(isEditingAnyProject())  // ← NUOVO
                             }
                         }
                     }
@@ -2261,10 +3053,10 @@ struct ContentView: View {
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(.black)
                                 .frame(width: isLand ? 90 : 140,
-                                       height: isLand ? 100 : 140)
+                                    height: isLand ? 100 : 140)
                                 .background(Circle().fill(Color.white))
                                 .overlay(
-                                  Circle().stroke(Color.black, lineWidth: 2))
+                                Circle().stroke(Color.black, lineWidth: 2))
                         }
                         .contentShape(Rectangle())
 
@@ -2274,12 +3066,12 @@ struct ContentView: View {
                             Circle()
                                 .fill(Color.yellow)
                                 .frame(width: isLand ? 90 : 140,
-                                       height: isLand ? 90 : 140)
+                                    height: isLand ? 90 : 140)
                                 .overlay(
-                                  Rectangle()
+                                Rectangle()
                                     .frame(width: isLand ? 90 : 140,
-                                           height: 1),
-                                  alignment: .center
+                                        height: 1),
+                                alignment: .center
                                 )
 
                             VStack(spacing: 0) {
@@ -2287,11 +3079,13 @@ struct ContentView: View {
                                     Color.clear
                                 }
                                 .frame(height: isLand ? 45 : 70)
+                                .disabled(isEditingAnyProject())  // ← NUOVO
 
                                 Button(action: cycleProject) {
                                     Color.clear
                                 }
                                 .frame(height: isLand ? 45 : 70)
+                                .disabled(isEditingAnyProject())  // ← NUOVO
                             }
 
                             VStack {
@@ -2307,7 +3101,7 @@ struct ContentView: View {
                         // ** slight right shift for perfect symmetry **
                         .offset(x: 30)
                         .overlay(
-                          Circle().stroke(Color.black, lineWidth: 2).offset(x: 30))
+                        Circle().stroke(Color.black, lineWidth: 2).offset(x: 30))
                     }
                     .padding(.horizontal, isLand ? 10 : 30)
                     .padding(.bottom, isLand ? 0 : 30)
@@ -2359,6 +3153,7 @@ struct ContentView: View {
             : projectManager.displayedCurrentProjects()
         guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
         projectManager.currentProject = arr[(idx + 1) % arr.count]
+        scrollTrigger = UUID()
     }
 
     private func previousProject() {
@@ -2383,6 +3178,7 @@ struct ContentView: View {
             : projectManager.displayedCurrentProjects()
         guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
         projectManager.currentProject = arr[(idx - 1 + arr.count) % arr.count]
+        scrollTrigger = UUID()
     }
 
     private func mainButtonTapped() {
@@ -2421,6 +3217,11 @@ struct ContentView: View {
     private func playSound(success: Bool) {
         // Implement AVFoundation if desired
     }
+
+    private func isEditingAnyProject() -> Bool {
+        return isEditingNote
+    }
+
 }
 
 // MARK: - App Entry
