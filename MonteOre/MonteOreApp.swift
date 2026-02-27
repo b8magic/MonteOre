@@ -1,4 +1,4 @@
-//4.5 TOP //aggiunti icona calendario, toggle, filtri, maximise view, etc. controllare se salva export csv divisi in etichette - estetica bella come prometteca di fare la 4.3.4. Infine, devo notare che questo codice si basa sulla 4.4 che però non ho conservato, quindi non so cos'altro avevo fatto nella 4.4 nè se tale features (4.3.4->4.4) sono rimaste, ma sperabilmente si
+//4.5.1 TOP //CODEX: ritorno ai progetti correnti rispettando le etichette visibili e ho implementato il bottone di spostamento righe con visualizzazione con raggruppamento per etichette, controllo copia‑prima‑elimina, riordino cronologico e feedback visivo di successo.
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
@@ -384,6 +384,7 @@ class ProjectManager: ObservableObject {
             let name = "\(project.name) \(m) \(y)"
             let backup = Project(name: name)
             backup.noteRows = project.noteRows
+            backup.labelID = project.labelID
 
             let url = getURLForBackup(project: backup)
             do {
@@ -719,6 +720,41 @@ class ProjectManager: ObservableObject {
 }
 
     // MARK: Helpers
+    func moveRow(_ row: NoteRow, from source: Project, to target: Project) -> Bool {
+        guard source.id != target.id else { return false }
+        if target.noteRows.contains(where: { $0.id == row.id }) { return false }
+
+        target.noteRows.append(row)
+        let appended = target.noteRows.contains(where: { $0.id == row.id })
+        guard appended else { return false }
+
+        target.noteRows.sort {
+            guard let d1 = target.dateFromGiorno($0.giorno),
+                  let d2 = target.dateFromGiorno($1.giorno)
+            else { return $0.giorno < $1.giorno }
+            return d1 < d2
+        }
+
+        if let idx = source.noteRows.firstIndex(where: { $0.id == row.id }) {
+            source.noteRows.remove(at: idx)
+        }
+
+        let sourceIsBackup = backupProjects.contains(where: { $0.id == source.id })
+        let targetIsBackup = backupProjects.contains(where: { $0.id == target.id })
+
+        if sourceIsBackup || targetIsBackup {
+            saveBackupProjects()
+            saveBackupOrder()
+        }
+        if !sourceIsBackup || !targetIsBackup {
+            saveProjects()
+        }
+
+        cleanupEmptyLock()
+        objectWillChange.send()
+        return true
+    }
+
     func postCycleNotification() {
         NotificationCenter.default.post(
           name: Notification.Name("CycleProjectNotification"),
@@ -1513,6 +1549,136 @@ struct RowDatePickerPopover: View {
     }
 }
 
+// MARK: - MoveRowRequest
+struct MoveRowRequest: Identifiable {
+    let id: UUID
+    let row: NoteRow
+    init(row: NoteRow) {
+        self.id = row.id
+        self.row = row
+    }
+}
+
+// MARK: - MoveRowSheet
+struct MoveRowSheet: View {
+    @ObservedObject var projectManager: ProjectManager
+    let sourceProject: Project
+    let onMove: (Project) -> Void
+    let onCancel: () -> Void
+
+    private func currentGroups() -> [(label: ProjectLabel?, projects: [Project])] {
+        var groups: [(label: ProjectLabel?, projects: [Project])] = []
+        let unl = projectManager.projects.filter {
+            $0.labelID == nil && $0.id != sourceProject.id
+        }
+        if !unl.isEmpty {
+            groups.append((label: nil, projects: unl))
+        }
+        for label in projectManager.labels {
+            let labelVisible = projectManager.visibleCurrentLabelIDs.isEmpty
+                || projectManager.visibleCurrentLabelIDs.contains(label.id)
+            if labelVisible {
+                let grp = projectManager.projects.filter {
+                    $0.labelID == label.id && $0.id != sourceProject.id
+                }
+                if !grp.isEmpty {
+                    groups.append((label: label, projects: grp))
+                }
+            }
+        }
+        return groups
+    }
+
+    private func backupGroups() -> [(label: ProjectLabel?, projects: [Project])] {
+        let base = projectManager.displayedBackupProjects().filter {
+            $0.id != sourceProject.id
+        }
+        var groups: [(label: ProjectLabel?, projects: [Project])] = []
+        let unl = base.filter { $0.labelID == nil }
+        if !unl.isEmpty {
+            groups.append((label: nil, projects: unl))
+        }
+        for label in projectManager.labels {
+            let grp = base.filter { $0.labelID == label.id }
+            if !grp.isEmpty {
+                groups.append((label: label, projects: grp))
+            }
+        }
+        return groups
+    }
+
+    @ViewBuilder
+    private func groupHeader(_ label: ProjectLabel?) -> some View {
+        HStack(spacing: 8) {
+            if let label = label {
+                Circle()
+                    .fill(Color(hex: label.color))
+                    .frame(width: 12, height: 12)
+                Text(label.title)
+                    .foregroundColor(Color(hex: label.color))
+            } else {
+                Text("Senza etichetta")
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .font(.subheadline)
+        .padding(.top, 6)
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                let currentProjectGroups = currentGroups()
+                let backupProjectGroups = backupGroups()
+
+                if currentProjectGroups.isEmpty && backupProjectGroups.isEmpty {
+                    Text("Nessun altro progetto disponibile.")
+                        .foregroundColor(.secondary)
+                }
+
+                if !currentProjectGroups.isEmpty {
+                    Section(header: Text("Progetti Correnti")) {
+                        ForEach(Array(currentProjectGroups.enumerated()), id: \.offset) { _, group in
+                            groupHeader(group.label)
+                            ForEach(group.projects) { p in
+                                Button(action: { onMove(p) }) {
+                                    HStack {
+                                        Text(p.name)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !backupProjectGroups.isEmpty {
+                    Section(header: Text("Mensilità Passate")) {
+                        ForEach(Array(backupProjectGroups.enumerated()), id: \.offset) { _, group in
+                            groupHeader(group.label)
+                            ForEach(group.projects) { p in
+                                Button(action: { onMove(p) }) {
+                                    HStack {
+                                        Text(p.name)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Sposta riga")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { onCancel() }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - NoteView
 struct NoteView: View {
     @ObservedObject var project: Project
@@ -1523,6 +1689,9 @@ struct NoteView: View {
     @State private var editMode = false
     @State private var editedRows: [NoteRow] = []
     @State private var isFullscreenEdit = false
+    @State private var moveRowRequest: MoveRowRequest? = nil
+    @State private var moveError: AlertError? = nil
+    @State private var showMoveSuccess = false
 
     // — Calendar popover state (restored from old version) —
     @State private var rowDatePickerRowId: UUID? = nil
@@ -1789,7 +1958,18 @@ struct NoteView: View {
                                                     .font(.system(size: 16))
                                                     .frame(width: 300, height: 100)
                                                     .padding(.horizontal, 4)
-                                                
+
+                                                // Move row button
+                                                Button(action: {
+                                                    moveRowRequest = MoveRowRequest(row: row)
+                                                }) {
+                                                    Image(systemName: "arrow.up.right.circle")
+                                                        .font(.title2)
+                                                        .foregroundColor(.blue)
+                                                        .frame(width: 32, height: 100)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
+
                                                 // Delete button
                                                 Button(action: {
                                                     if let i = editedRows.firstIndex(where: { $0.id == row.id }) {
@@ -1882,6 +2062,16 @@ struct NoteView: View {
                                                 TextField("Note", text: $row.note)
                                                     .font(.system(size: 14))
                                                     .frame(height: 60)
+
+                                                // Move row button
+                                                Button(action: {
+                                                    moveRowRequest = MoveRowRequest(row: row)
+                                                }) {
+                                                    Image(systemName: "arrow.up.right.circle")
+                                                        .font(.title2)
+                                                        .foregroundColor(.blue)
+                                                }
+                                                .buttonStyle(PlainButtonStyle())
 
                                                 // Delete button
                                                 Button(action: {
@@ -1986,9 +2176,56 @@ struct NoteView: View {
                 }
             }
             .padding(20)
+
+            if showMoveSuccess {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundColor(.green)
+                    .padding(18)
+                    .background(
+                        Circle().fill(Color.white.opacity(0.95))
+                            .shadow(color: Color.black.opacity(0.2), radius: 6)
+                    )
+                    .transition(.scale.combined(with: .opacity))
+                    .allowsHitTesting(false)
+            }
         }
         .cornerRadius(25)
         .clipped()
+        .sheet(item: $moveRowRequest) { req in
+            MoveRowSheet(
+                projectManager: projectManager,
+                sourceProject: project,
+                onMove: { target in
+                    let success = projectManager.moveRow(req.row, from: project, to: target)
+                    if success {
+                        if let idx = editedRows.firstIndex(where: { $0.id == req.row.id }) {
+                            editedRows.remove(at: idx)
+                        }
+                        showMoveSuccess = false
+                        DispatchQueue.main.async {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                showMoveSuccess = true
+                            }
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                            withAnimation(.easeOut(duration: 0.3)) {
+                                showMoveSuccess = false
+                            }
+                        }
+                    } else {
+                        moveError = AlertError(message: "Impossibile spostare la riga.")
+                    }
+                    moveRowRequest = nil
+                },
+                onCancel: {
+                    moveRowRequest = nil
+                }
+            )
+        }
+        .alert(item: $moveError) { err in
+            Alert(title: Text("Errore"), message: Text(err.message), dismissButton: .default(Text("OK")))
+        }
         .onChange(of: editMode) {
             isEditingNote = editMode
         }
@@ -2409,6 +2646,8 @@ struct ProjectManagerView: View {
 
     @State private var showHow = false
     @State private var showHowButton = false
+    @State private var showSearch = false
+    @State private var searchText = ""
 
     @State private var editMode: EditMode = .inactive
     @State private var editingProjects = false
@@ -2426,12 +2665,65 @@ struct ProjectManagerView: View {
     //Stato per quando in gestione progetti correnti clicco sul titolo di un'etichetta
     @State private var createProjectWithLabel: ProjectLabel? = nil
 
+    private var searchQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var isSearching: Bool {
+        !searchQuery.isEmpty
+    }
+    private func matchesSearch(_ project: Project) -> Bool {
+        guard isSearching else { return true }
+        if project.name.localizedCaseInsensitiveContains(searchQuery) {
+            return true
+        }
+        return project.noteRows.contains {
+            $0.note.localizedCaseInsensitiveContains(searchQuery)
+        }
+    }
+
 
     var body: some View {
         NavigationView {
             VStack {
+                if showSearch {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.black)
+                        TextField("Cerca titolo o note", text: $searchText)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .disableAutocorrection(true)
+                            .autocapitalization(.none)
+                        if !searchText.isEmpty {
+                            Button(action: { searchText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.gray)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                        Button(action: {
+                            showSearch = false
+                            searchText = ""
+                        }) {
+                            Text("Chiudi")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
                 // ───────────────── LISTA PROGETTI ─────────────────
                 List {
+                    let currentProjects = isSearching
+                        ? projectManager.projects.filter { matchesSearch($0) }
+                        : projectManager.projects
+                    let showPastSection = projectManager.pastMonthsVisible || isSearching
+                    let backupBase = isSearching
+                        ? projectManager.backupProjects
+                        : projectManager.displayedBackupProjects()
+                    let backupProjects = isSearching
+                        ? backupBase.filter { matchesSearch($0) }
+                        : backupBase
+
                     Section(header:
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Progetti Correnti")
@@ -2444,7 +2736,7 @@ struct ProjectManagerView: View {
                             .foregroundColor(.blue)
                         }
                     ) {
-                        let unl = projectManager.projects.filter { $0.labelID == nil }
+                        let unl = currentProjects.filter { $0.labelID == nil }
                         if !unl.isEmpty {
                             ForEach(unl) { p in
                                 ProjectRowView(
@@ -2462,16 +2754,22 @@ struct ProjectManagerView: View {
                             }
                         }
                         ForEach(projectManager.labels) { lab in
-                            if projectManager.visibleCurrentLabelIDs.isEmpty || projectManager.visibleCurrentLabelIDs.contains(lab.id) {
-                                LabelHeaderView(
-                                    label: lab,
-                                    projectManager: projectManager,
-                                    isBackup: false,
-                                    onCreateWithLabel: {
-                                        createProjectWithLabel = lab
-                                    }
-                                )
-                                let grp = projectManager.projects.filter { $0.labelID == lab.id }
+                            let labelVisible = isSearching
+                                ? true
+                                : (projectManager.visibleCurrentLabelIDs.isEmpty
+                                   || projectManager.visibleCurrentLabelIDs.contains(lab.id))
+                            if labelVisible {
+                                let grp = currentProjects.filter { $0.labelID == lab.id }
+                                if !grp.isEmpty || !isSearching {
+                                    LabelHeaderView(
+                                        label: lab,
+                                        projectManager: projectManager,
+                                        isBackup: false,
+                                        onCreateWithLabel: {
+                                            createProjectWithLabel = lab
+                                        }
+                                    )
+                                }
                                 if !grp.isEmpty {
                                     ForEach(grp) { p in
                                         ProjectRowView(
@@ -2516,8 +2814,8 @@ struct ProjectManagerView: View {
                             }
                         }
                     ) {
-                        if projectManager.pastMonthsVisible {
-                            let backupUnl = projectManager.displayedBackupProjects().filter { $0.labelID == nil }
+                        if showPastSection {
+                            let backupUnl = backupProjects.filter { $0.labelID == nil }
                             if !backupUnl.isEmpty {
                                 ForEach(backupUnl) { p in
                                     ProjectRowView(
@@ -2535,8 +2833,12 @@ struct ProjectManagerView: View {
                                 }
                             }
                             ForEach(projectManager.labels) { lab in
-                                if projectManager.visibleBackupLabelIDs.isEmpty || projectManager.visibleBackupLabelIDs.contains(lab.id) {
-                                    let grp = projectManager.displayedBackupProjects().filter { $0.labelID == lab.id }
+                                let labelVisible = isSearching
+                                    ? true
+                                    : (projectManager.visibleBackupLabelIDs.isEmpty
+                                       || projectManager.visibleBackupLabelIDs.contains(lab.id))
+                                if labelVisible {
+                                    let grp = backupProjects.filter { $0.labelID == lab.id }
                                     if !grp.isEmpty {
                                         LabelHeaderView(
                                             label: lab,
@@ -2637,24 +2939,40 @@ struct ProjectManagerView: View {
                     ProjectEditToggleButton(isEditing: $editingProjects)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    if showHowButton {
-                        Button(action: { showHow = true }) {
-                            Text("Campo Base")
-                                .font(.custom("Permanent Marker", size: 20))
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            withAnimation {
+                                showSearch.toggle()
+                            }
+                            if !showSearch {
+                                searchText = ""
+                            }
+                        }) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 20, weight: .bold))
                                 .foregroundColor(.black)
-                                .padding(8)
-                                .background(Color.yellow)
-                                .cornerRadius(8)
                         }
                         .contentShape(Rectangle())
-                    } else {
-                        Button(action: { showHowButton = true }) {
-                            Text("?")
-                                .font(.system(size: 40))
-                                .bold()
-                                .foregroundColor(.yellow)
+
+                        if showHowButton {
+                            Button(action: { showHow = true }) {
+                                Text("Campo Base")
+                                    .font(.custom("Permanent Marker", size: 20))
+                                    .foregroundColor(.black)
+                                    .padding(8)
+                                    .background(Color.yellow)
+                                    .cornerRadius(8)
+                            }
+                            .contentShape(Rectangle())
+                        } else {
+                            Button(action: { showHowButton = true }) {
+                                Text("?")
+                                    .font(.system(size: 40))
+                                    .bold()
+                                    .foregroundColor(.yellow)
+                            }
+                            .contentShape(Rectangle())
                         }
-                        .contentShape(Rectangle())
                     }
                 }
             }
@@ -3025,13 +3343,25 @@ struct ContentView: View {
 
                             if isBackup {
                                 Button(action: {
-                                    if let lockedC = projectManager.lockedLabelID,
-                                    let first = projectManager.projects.first(
-                                        where: { $0.labelID == lockedC })
+                                    let lockedC = projectManager.lockedLabelID
+                                    let visibleSet = projectManager.visibleCurrentLabelIDs
+                                    let lockVisible = lockedC != nil
+                                        && (visibleSet.isEmpty || visibleSet.contains(lockedC!))
+                                    if lockVisible,
+                                       let lockedId = lockedC,
+                                       let first = projectManager.projects.first(
+                                        where: { $0.labelID == lockedId })
                                     {
                                         projectManager.currentProject = first
                                     } else {
-                                        projectManager.currentProject = projectManager.projects.first
+                                        if let firstVisible = projectManager.displayedCurrentProjects().first {
+                                            projectManager.currentProject = firstVisible
+                                        } else {
+                                            projectManager.currentProject = projectManager.projects.first
+                                        }
+                                        if lockedC != nil && !lockVisible {
+                                            projectManager.lockedLabelID = nil
+                                        }
                                     }
                                     projectManager.lockedBackupLabelID = nil
                                 }) {
