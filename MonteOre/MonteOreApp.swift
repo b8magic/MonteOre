@@ -3608,6 +3608,7 @@ struct ContentView: View {
     @State private var showHomeSearch = false
     @State private var homeSearchCurrent = ""
     @State private var homeSearchBackup = ""
+    @FocusState private var isHomeSearchFocused: Bool
 
     @AppStorage("medalAwarded") private var medalAwarded = false
 
@@ -3666,10 +3667,11 @@ struct ContentView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(.black)
-                            TextField("Cerca titolo, note o data", text: searchBinding)
+                            TextField("Filtra per titolo, note o data", text: searchBinding)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                                 .disableAutocorrection(true)
                                 .autocapitalization(.none)
+                                .focused($isHomeSearchFocused)
                             if !searchBinding.wrappedValue.isEmpty {
                                 Button(action: { searchBinding.wrappedValue = "" }) {
                                     Image(systemName: "xmark.circle.fill")
@@ -3679,6 +3681,7 @@ struct ContentView: View {
                             }
                             Button(action: {
                                 showHomeSearch = false
+                                isHomeSearchFocused = false
                                 clearHomeSearchText(forBackup: isBackup)
                             }) {
                                 Text("Chiudi")
@@ -3686,6 +3689,15 @@ struct ContentView: View {
                             }
                         }
                         .padding(.horizontal)
+                        .toolbar {
+                            ToolbarItemGroup(placement: .keyboard) {
+                                Spacer()
+                                Button("Fine") {
+                                    isHomeSearchFocused = false
+                                }
+                                .foregroundColor(.blue)
+                            }
+                        }
                     }
 
                     // —— NEW: lock button + Pigia/Torna ——
@@ -3775,11 +3787,12 @@ struct ContentView: View {
                                     withAnimation {
                                         showHomeSearch = newValue
                                     }
-                                    if newValue {
-                                        applyHomeSearchIfNeeded(forBackup: isBackup)
-                                    } else {
-                                        clearHomeSearchText(forBackup: isBackup)
-                                    }
+                            if newValue {
+                                applyHomeSearchIfNeeded(forBackup: isBackup)
+                            } else {
+                                isHomeSearchFocused = false
+                                clearHomeSearchText(forBackup: isBackup)
+                            }
                                 }) {
                                     Image(systemName: "magnifyingglass")
                                         .font(.system(size: isLand ? 18 : 22, weight: .bold))
