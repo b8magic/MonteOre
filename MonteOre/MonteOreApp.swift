@@ -1,4 +1,4 @@
-//4.5.1 TOP //CODEX: ritorno ai progetti correnti rispettando le etichette visibili e ho implementato il bottone di spostamento righe con visualizzazione con raggruppamento per etichette, controllo copia‑prima‑elimina, riordino cronologico e feedback visivo di successo.
+//4.5.2 TOP //CODEX: corretto il filtro "anni mostrati" nelle mensilità passate, esteso le ricerche con bottone lente (ora ricerca anche nella cella delle date), aggiunto ricerca con Lente in visione Home che modifica funzionamento tasto giallo, aggiunti '>' per collasso etichette persistente in visione progetto, aggiunto conteggio ore con gestione “anno mancante” (icona orologio), e un pannello Impostazioni con toggle persistente. In più ho rifinito layout e posizionamento dei pulsanti in Home, aggiunto icone (lente, orologio, ingranaggio) e reso la UI stabile senza spostamenti indesiderati
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
@@ -231,6 +231,27 @@ class ProjectManager: ObservableObject {
             UserDefaults.standard.set(arr, forKey: "visibleCurrentLabelIDs")
         }
     }
+    /// Etichette collassate in Progetti Correnti (salvato in UserDefaults)
+    @Published var collapsedCurrentLabelIDs: Set<UUID> = [] {
+        didSet {
+            let arr = collapsedCurrentLabelIDs.map { $0.uuidString }
+            UserDefaults.standard.set(arr, forKey: "collapsedCurrentLabelIDs")
+        }
+    }
+    /// Etichette collassate in Mensilità Passate (salvato in UserDefaults)
+    @Published var collapsedBackupLabelIDs: Set<UUID> = [] {
+        didSet {
+            let arr = collapsedBackupLabelIDs.map { $0.uuidString }
+            UserDefaults.standard.set(arr, forKey: "collapsedBackupLabelIDs")
+        }
+    }
+    /// Impostazione: pulsante giallo include etichette collassate
+    @Published var cycleIncludesCollapsedLabels: Bool = true {
+        didSet {
+            UserDefaults.standard.set(cycleIncludesCollapsedLabels,
+                                      forKey: "cycleIncludesCollapsedLabels")
+        }
+    }
 
     let projectsFileName    = "projects.json"
     let backupOrderFileName = "backupOrder.json"
@@ -264,6 +285,13 @@ class ProjectManager: ObservableObject {
         if let arr = UserDefaults.standard.array(forKey: "visibleCurrentLabelIDs") as? [String] {
             visibleCurrentLabelIDs = Set(arr.compactMap { UUID(uuidString: $0) })
         }
+        if let arr = UserDefaults.standard.array(forKey: "collapsedCurrentLabelIDs") as? [String] {
+            collapsedCurrentLabelIDs = Set(arr.compactMap { UUID(uuidString: $0) })
+        }
+        if let arr = UserDefaults.standard.array(forKey: "collapsedBackupLabelIDs") as? [String] {
+            collapsedBackupLabelIDs = Set(arr.compactMap { UUID(uuidString: $0) })
+        }
+        cycleIncludesCollapsedLabels = UserDefaults.standard.object(forKey: "cycleIncludesCollapsedLabels") as? Bool ?? true
 
         if let lastId = UserDefaults.standard.string(
            forKey: "lastProjectId"),
@@ -503,6 +531,8 @@ class ProjectManager: ObservableObject {
         labels.removeAll(where: { $0.id == label.id })
         for p in projects where p.labelID == label.id { p.labelID = nil }
         for p in backupProjects where p.labelID == label.id { p.labelID = nil }
+        collapsedCurrentLabelIDs.remove(label.id)
+        collapsedBackupLabelIDs.remove(label.id)
         saveLabels()
         saveProjects()
         saveBackupOrder()
@@ -648,21 +678,36 @@ class ProjectManager: ObservableObject {
     }
 
     // MARK: Display Helpers
-    /// Estrae anno da titolo backup: ultimo numero 1-99 nel titolo → 2001-2099
+    /// Estrae anno da titolo backup: ultimo numero 1-99 → 2001-2099,
+    /// oppure ultimo numero a 4 cifre 2000-2099
     static func yearFromBackupTitle(_ name: String) -> Int? {
         var lastYear: Int? = nil
-        var num = 0
-        var inNumber = false
-        for c in name + " " {
+        var buffer = ""
+
+        func flushBuffer() {
+            guard !buffer.isEmpty else { return }
+            if buffer.count == 4,
+               let val = Int(buffer),
+               val >= 2000, val <= 2099
+            {
+                lastYear = val
+            } else if buffer.count <= 2,
+                      let val = Int(buffer),
+                      val >= 1, val <= 99
+            {
+                lastYear = 2000 + val
+            }
+            buffer = ""
+        }
+
+        for c in name {
             if c.isNumber {
-                inNumber = true
-                num = num * 10 + (Int(String(c)) ?? 0)
+                buffer.append(c)
             } else {
-                if inNumber && num >= 1 && num <= 99 { lastYear = 2000 + num }
-                inNumber = false
-                num = 0
+                flushBuffer()
             }
         }
+        flushBuffer()
         return lastYear
     }
     /// Anni presenti nei titoli delle mensilità passate (per filtro Anni mostrati)
@@ -1070,6 +1115,8 @@ struct LabelHeaderView: View {
     @ObservedObject var projectManager: ProjectManager
     var isBackup = false
     var onCreateWithLabel: (() -> Void)? = nil
+    var isCollapsed: Bool = false
+    var onToggleCollapse: (() -> Void)? = nil
 
     @State private var isTargeted = false
 
@@ -1117,6 +1164,18 @@ private var labelTitleView: some View {
         }
     }
 
+    @ViewBuilder
+    private var collapseButtonView: some View {
+        if hasInSection, let onToggleCollapse = onToggleCollapse {
+            Button(action: onToggleCollapse) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .foregroundColor(.black)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .contentShape(Rectangle())
+        }
+    }
+
     private func toggleLock() {
         if isBackup {
             if projectManager.lockedBackupLabelID == label.id {
@@ -1146,6 +1205,7 @@ private var labelTitleView: some View {
                 .fill(Color(hex: label.color))
                 .frame(width: 16, height: 16)
             labelTitleView
+            collapseButtonView
             Spacer()
             lockButtonView
         }
@@ -2559,6 +2619,242 @@ struct EtichetteMostrateSheet: View {
     }
 }
 
+// MARK: - Conteggio Ore
+struct HoursCountSheetView: View {
+    @ObservedObject var projectManager: ProjectManager
+    @Environment(\.presentationMode) var presentationMode
+    @State private var fromDate: Date = Date()
+    @State private var toDate: Date = Date()
+    @State private var showMissingYearInfo = false
+
+    struct MissingYearIssue: Identifiable {
+        let id = UUID()
+        let projectName: String
+        let rawDate: String
+    }
+
+    private func parseDateWithRequiredYear(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let pattern = #"(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?"#
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: trimmed,
+                                        range: NSRange(trimmed.startIndex..., in: trimmed)),
+           let dayRange = Range(match.range(at: 1), in: trimmed),
+           let monthRange = Range(match.range(at: 2), in: trimmed),
+           let yearRange = Range(match.range(at: 3), in: trimmed)
+        {
+            let day = Int(trimmed[dayRange]) ?? 0
+            let month = Int(trimmed[monthRange]) ?? 0
+            let yStr = String(trimmed[yearRange])
+            guard let yVal = Int(yStr) else { return nil }
+            let year = (yStr.count == 2) ? (2000 + yVal) : yVal
+            guard year >= 2000 && year <= 2099 else { return nil }
+            var comps = DateComponents()
+            comps.year = year
+            comps.month = month
+            comps.day = day
+            return Calendar(identifier: .gregorian).date(from: comps)
+        }
+
+        return nil
+    }
+
+    private func hasMissingYear(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let pattern = #"(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?"#
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: trimmed,
+                                        range: NSRange(trimmed.startIndex..., in: trimmed))
+        {
+            return match.range(at: 3).location == NSNotFound
+        }
+        return false
+    }
+
+    private var normalizedRange: (start: Date, end: Date) {
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: fromDate)
+        let end = cal.startOfDay(for: toDate)
+        return start <= end ? (start, end) : (end, start)
+    }
+
+    private var totalsAndIssues: (totals: [UUID?: Int], issues: [MissingYearIssue]) {
+        var totals: [UUID?: Int] = [:]
+        for label in projectManager.labels {
+            totals[label.id] = 0
+        }
+        totals[nil] = 0
+        var issues: [MissingYearIssue] = []
+
+        let cal = Calendar.current
+        let range = normalizedRange
+        let allProjects = projectManager.projects + projectManager.backupProjects
+        for project in allProjects {
+            for row in project.noteRows {
+                if hasMissingYear(row.giorno) {
+                    issues.append(
+                        MissingYearIssue(
+                            projectName: project.name,
+                            rawDate: row.giorno
+                        )
+                    )
+                    continue
+                }
+                guard let d = parseDateWithRequiredYear(row.giorno) else { continue }
+                let day = cal.startOfDay(for: d)
+                if day < range.start || day > range.end { continue }
+                totals[project.labelID, default: 0] += row.totalMinutes
+            }
+        }
+        return (totals, issues)
+    }
+
+    private func timeString(from minutes: Int) -> String {
+        let h = minutes / 60
+        let m = minutes % 60
+        return "\(h)h \(m)m"
+    }
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    DatePicker("Da", selection: $fromDate, displayedComponents: .date)
+                        .environment(\.locale, Locale(identifier: "it_IT"))
+                    DatePicker("A", selection: $toDate, displayedComponents: .date)
+                        .environment(\.locale, Locale(identifier: "it_IT"))
+                    let issues = totalsAndIssues.issues
+                    if !issues.isEmpty {
+                        Button(action: { showMissingYearInfo = true }) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundColor(.red)
+                                .font(.title2)
+                        }
+                        .accessibilityLabel("Date senza anno")
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                Divider()
+
+                let totals = totalsAndIssues.totals
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(projectManager.labels) { label in
+                            HStack {
+                                Circle()
+                                    .fill(Color(hex: label.color))
+                                    .frame(width: 14, height: 14)
+                                Text(label.title)
+                                Spacer()
+                                Text(timeString(from: totals[label.id] ?? 0))
+                            }
+                            .padding(.horizontal)
+                        }
+
+                        Divider().padding(.horizontal)
+
+                        HStack {
+                            Text("Senza etichetta")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(timeString(from: totals[nil] ?? 0))
+                        }
+                        .padding(.horizontal)
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+            .navigationTitle("Conteggio ore")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Chiudi") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showMissingYearInfo) {
+            let issues = totalsAndIssues.issues
+            NavigationView {
+                List {
+                    if issues.isEmpty {
+                        Text("Nessuna data senza anno.")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(issues) { item in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Manca l'anno in nota chiamata \(item.projectName)")
+                                    .font(.headline)
+                                Text("Cella data da riparare: \(item.rawDate)")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+                .navigationTitle("Date senza anno")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Chiudi") { showMissingYearInfo = false }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Impostazioni
+struct SettingsSheetView: View {
+    @ObservedObject var projectManager: ProjectManager
+    @Environment(\.presentationMode) var presentationMode
+
+    var body: some View {
+        NavigationView {
+            List {
+                HStack(spacing: 12) {
+                    Text("Pulsante giallo scorre attraverso le etichette collassate con '>'")
+                        .font(.headline)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 16)
+
+                    Button(action: {
+                        projectManager.cycleIncludesCollapsedLabels.toggle()
+                    }) {
+                        Text(projectManager.cycleIncludesCollapsedLabels ? "ON" : "OFF")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(projectManager.cycleIncludesCollapsedLabels ? Color.green : Color.red)
+                            )
+                    }
+                    .accessibilityLabel("Toggle etichette collassate")
+                }
+                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+            }
+            .listStyle(PlainListStyle())
+            .navigationTitle("Impostazioni")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Chiudi") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Crea progetto con etichetta
 struct CreateProjectWithLabelSheet: View {
     @ObservedObject var projectManager: ProjectManager
@@ -2648,6 +2944,8 @@ struct ProjectManagerView: View {
     @State private var showHowButton = false
     @State private var showSearch = false
     @State private var searchText = ""
+    @State private var showHoursCount = false
+    @State private var showSettings = false
 
     @State private var editMode: EditMode = .inactive
     @State private var editingProjects = false
@@ -2678,6 +2976,7 @@ struct ProjectManagerView: View {
         }
         return project.noteRows.contains {
             $0.note.localizedCaseInsensitiveContains(searchQuery)
+            || $0.giorno.localizedCaseInsensitiveContains(searchQuery)
         }
     }
 
@@ -2689,7 +2988,7 @@ struct ProjectManagerView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.black)
-                        TextField("Cerca titolo o note", text: $searchText)
+                        TextField("Cerca titolo, note o data", text: $searchText)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
                             .disableAutocorrection(true)
                             .autocapitalization(.none)
@@ -2760,6 +3059,7 @@ struct ProjectManagerView: View {
                                    || projectManager.visibleCurrentLabelIDs.contains(lab.id))
                             if labelVisible {
                                 let grp = currentProjects.filter { $0.labelID == lab.id }
+                                let isCollapsed = projectManager.collapsedCurrentLabelIDs.contains(lab.id)
                                 if !grp.isEmpty || !isSearching {
                                     LabelHeaderView(
                                         label: lab,
@@ -2767,10 +3067,18 @@ struct ProjectManagerView: View {
                                         isBackup: false,
                                         onCreateWithLabel: {
                                             createProjectWithLabel = lab
+                                        },
+                                        isCollapsed: isCollapsed,
+                                        onToggleCollapse: {
+                                            if isCollapsed {
+                                                projectManager.collapsedCurrentLabelIDs.remove(lab.id)
+                                            } else {
+                                                projectManager.collapsedCurrentLabelIDs.insert(lab.id)
+                                            }
                                         }
                                     )
                                 }
-                                if !grp.isEmpty {
+                                if !grp.isEmpty && !isCollapsed {
                                     ForEach(grp) { p in
                                         ProjectRowView(
                                             project: p,
@@ -2839,25 +3147,36 @@ struct ProjectManagerView: View {
                                        || projectManager.visibleBackupLabelIDs.contains(lab.id))
                                 if labelVisible {
                                     let grp = backupProjects.filter { $0.labelID == lab.id }
+                                    let isCollapsed = projectManager.collapsedBackupLabelIDs.contains(lab.id)
                                     if !grp.isEmpty {
                                         LabelHeaderView(
                                             label: lab,
                                             projectManager: projectManager,
-                                            isBackup: true
+                                            isBackup: true,
+                                            isCollapsed: isCollapsed,
+                                            onToggleCollapse: {
+                                                if isCollapsed {
+                                                    projectManager.collapsedBackupLabelIDs.remove(lab.id)
+                                                } else {
+                                                    projectManager.collapsedBackupLabelIDs.insert(lab.id)
+                                                }
+                                            }
                                         )
-                                        ForEach(grp) { p in
-                                            ProjectRowView(
-                                                project: p,
-                                                projectManager: projectManager,
-                                                editingProjects: editingProjects
-                                            )
-                                        }
-                                        .onMove { idx, off in
-                                            projectManager.moveBackupProjects(
-                                                forLabel: lab.id,
-                                                indices: idx,
-                                                newOffset: off
-                                            )
+                                        if !isCollapsed {
+                                            ForEach(grp) { p in
+                                                ProjectRowView(
+                                                    project: p,
+                                                    projectManager: projectManager,
+                                                    editingProjects: editingProjects
+                                                )
+                                            }
+                                            .onMove { idx, off in
+                                                projectManager.moveBackupProjects(
+                                                    forLabel: lab.id,
+                                                    indices: idx,
+                                                    newOffset: off
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -2940,6 +3259,20 @@ struct ProjectManagerView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 12) {
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundColor(.black)
+                        }
+                        .contentShape(Rectangle())
+
+                        Button(action: { showHoursCount = true }) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundColor(.black)
+                        }
+                        .contentShape(Rectangle())
+
                         Button(action: {
                             withAnimation {
                                 showSearch.toggle()
@@ -2978,6 +3311,12 @@ struct ProjectManagerView: View {
             }
             .sheet(isPresented: $showEtichette) {
                 LabelsManagerView(projectManager: projectManager)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsSheetView(projectManager: projectManager)
+            }
+            .sheet(isPresented: $showHoursCount) {
+                HoursCountSheetView(projectManager: projectManager)
             }
             .sheet(isPresented: $showAnniMostratiBackup) {
                 AnniMostratiSheet(projectManager: projectManager) {
@@ -3266,6 +3605,9 @@ struct ContentView: View {
     @State private var isEditingNote = false
 
     @State private var scrollTrigger = UUID()
+    @State private var showHomeSearch = false
+    @State private var homeSearchCurrent = ""
+    @State private var homeSearchBackup = ""
 
     @AppStorage("medalAwarded") private var medalAwarded = false
 
@@ -3277,6 +3619,16 @@ struct ContentView: View {
                   proj in projectManager.backupProjects.first(
                      where: { $0.id == proj.id })
                 } != nil
+            let pigiaSize: CGFloat = isLand ? 100 : 140
+            let lockSize: CGFloat = isLand ? 50 : 70
+            let lensSize: CGFloat = isLand ? 44 : 60
+            let searchBarOffset: CGFloat = (showHomeSearch && !noProj)
+                ? (isLand ? 60 : 80)
+                : 0
+            let baseNoteHeight: CGFloat = isLand
+                ? geo.size.height * 0.4
+                : geo.size.height * 0.6
+            let noteHeight: CGFloat = max(140, baseNoteHeight - searchBarOffset)
 
             ZStack {
                 Color(hex: "#54c0ff").edgesIgnoringSafeArea(.all)
@@ -3296,87 +3648,156 @@ struct ContentView: View {
                             .frame(
                             width: isLand ? geo.size.width
                                             : geo.size.width - 40,
-                            height: isLand ? geo.size.height * 0.4
-                                            : geo.size.height * 0.6)
+                            height: noteHeight)
                         }
                     }
 
-                    // —— NEW: lock button + Pigia/Torna ——
-                    // —— NEW: lock button + Pigia/Torna ——
-                    HStack(spacing: 20) {
-                        // unlock button if showing a locked label (and only if labelled)
-                        if let cur = projectManager.currentProject,
-                        let lid = cur.labelID,
-                        (projectManager.lockedLabelID == lid
-                            || projectManager.lockedBackupLabelID == lid)
-                        {
+                    if showHomeSearch && !noProj {
+                        let searchBinding = Binding<String>(
+                            get: { isBackup ? homeSearchBackup : homeSearchCurrent },
+                            set: { newVal in
+                                if isBackup {
+                                    homeSearchBackup = newVal
+                                } else {
+                                    homeSearchCurrent = newVal
+                                }
+                            }
+                        )
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.black)
+                            TextField("Cerca titolo, note o data", text: searchBinding)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .disableAutocorrection(true)
+                                .autocapitalization(.none)
+                            if !searchBinding.wrappedValue.isEmpty {
+                                Button(action: { searchBinding.wrappedValue = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.gray)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
                             Button(action: {
-                                if projectManager.lockedLabelID == lid {
-                                    projectManager.lockedLabelID = nil
-                                }
-                                if projectManager.lockedBackupLabelID == lid {
-                                    projectManager.lockedBackupLabelID = nil
-                                }
-                                projectManager.cleanupEmptyLock()
+                                showHomeSearch = false
+                                clearHomeSearchText(forBackup: isBackup)
                             }) {
-                                Image(systemName: "lock.fill")
-                                    .font(.title)
-                                    .foregroundColor(.black)
-                                    .frame(width: isLand ? 50 : 70,
-                                        height: isLand ? 50 : 70)
-                                    .background(Circle().fill(Color.white))
+                                Text("Chiudi")
+                                    .foregroundColor(.blue)
                             }
-                            .contentShape(Rectangle())
-                            .disabled(isEditingAnyProject())  // ← NUOVO
                         }
+                        .padding(.horizontal)
+                    }
 
-                        ZStack {
-                            Button(action: { mainButtonTapped() }) {
-                                Text("Pigia il tempo")
-                                    .font(.title2)
-                                    .foregroundColor(.white)
-                                    .frame(width: isLand ? 100 : 140,
-                                        height: isLand ? 100 : 140)
-                                    .background(Circle().fill(Color.black))
-                            }
-                            .disabled(isBackup || projectManager.currentProject == nil || isEditingAnyProject())  // ← MODIFICATO
-
-                            if isBackup {
-                                Button(action: {
-                                    let lockedC = projectManager.lockedLabelID
-                                    let visibleSet = projectManager.visibleCurrentLabelIDs
-                                    let lockVisible = lockedC != nil
-                                        && (visibleSet.isEmpty || visibleSet.contains(lockedC!))
-                                    if lockVisible,
-                                       let lockedId = lockedC,
-                                       let first = projectManager.projects.first(
-                                        where: { $0.labelID == lockedId })
-                                    {
-                                        projectManager.currentProject = first
-                                    } else {
-                                        if let firstVisible = projectManager.displayedCurrentProjects().first {
-                                            projectManager.currentProject = firstVisible
-                                        } else {
-                                            projectManager.currentProject = projectManager.projects.first
-                                        }
-                                        if lockedC != nil && !lockVisible {
+                    // —— NEW: lock button + Pigia/Torna ——
+                    GeometryReader { rowGeo in
+                        let sideWidth = max(0, (rowGeo.size.width - pigiaSize) / 2)
+                        HStack(spacing: 0) {
+                            ZStack(alignment: .leading) {
+                                // unlock button if showing a locked label (and only if labelled)
+                                if let cur = projectManager.currentProject,
+                                let lid = cur.labelID,
+                                (projectManager.lockedLabelID == lid
+                                    || projectManager.lockedBackupLabelID == lid)
+                                {
+                                    Button(action: {
+                                        if projectManager.lockedLabelID == lid {
                                             projectManager.lockedLabelID = nil
                                         }
+                                        if projectManager.lockedBackupLabelID == lid {
+                                            projectManager.lockedBackupLabelID = nil
+                                        }
+                                        projectManager.cleanupEmptyLock()
+                                    }) {
+                                        Image(systemName: "lock.fill")
+                                            .font(.title)
+                                            .foregroundColor(.black)
+                                            .frame(width: lockSize,
+                                                height: lockSize)
+                                            .background(Circle().fill(Color.white))
                                     }
-                                    projectManager.lockedBackupLabelID = nil
+                                    .contentShape(Rectangle())
+                                    .disabled(isEditingAnyProject())  // ← NUOVO
+                                }
+                            }
+                            .frame(width: sideWidth, alignment: .leading)
+
+                            ZStack {
+                                Button(action: { mainButtonTapped() }) {
+                                    Text("Pigia il tempo")
+                                        .font(.title2)
+                                        .foregroundColor(.white)
+                                        .frame(width: pigiaSize,
+                                            height: pigiaSize)
+                                        .background(Circle().fill(Color.black))
+                                }
+                                .disabled(isBackup || projectManager.currentProject == nil || isEditingAnyProject())  // ← MODIFICATO
+
+                                if isBackup {
+                                    Button(action: {
+                                        let lockedC = projectManager.lockedLabelID
+                                        let visibleSet = projectManager.visibleCurrentLabelIDs
+                                        let lockVisible = lockedC != nil
+                                            && (visibleSet.isEmpty || visibleSet.contains(lockedC!))
+                                        if lockVisible,
+                                           let lockedId = lockedC,
+                                           let first = projectManager.projects.first(
+                                            where: { $0.labelID == lockedId })
+                                        {
+                                            projectManager.currentProject = first
+                                        } else {
+                                            if let firstVisible = projectManager.displayedCurrentProjects().first {
+                                                projectManager.currentProject = firstVisible
+                                            } else {
+                                                projectManager.currentProject = projectManager.projects.first
+                                            }
+                                            if lockedC != nil && !lockVisible {
+                                                projectManager.lockedLabelID = nil
+                                            }
+                                        }
+                                        projectManager.lockedBackupLabelID = nil
+                                    }) {
+                                        Text("Torna ai progetti correnti")
+                                            .multilineTextAlignment(.center)
+                                            .foregroundColor(.black)
+                                            .frame(width: pigiaSize,
+                                                height: pigiaSize)
+                                            .background(Circle().fill(Color(hex: "#54c0ff")))
+                                    }
+                                    .contentShape(Rectangle())
+                                    .disabled(isEditingAnyProject())  // ← NUOVO
+                                }
+                            }
+                            .frame(width: pigiaSize)
+
+                            ZStack {
+                                Button(action: {
+                                    let newValue = !showHomeSearch
+                                    withAnimation {
+                                        showHomeSearch = newValue
+                                    }
+                                    if newValue {
+                                        applyHomeSearchIfNeeded(forBackup: isBackup)
+                                    } else {
+                                        clearHomeSearchText(forBackup: isBackup)
+                                    }
                                 }) {
-                                    Text("Torna ai progetti correnti")
-                                        .multilineTextAlignment(.center)
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: isLand ? 18 : 22, weight: .bold))
                                         .foregroundColor(.black)
-                                        .frame(width: isLand ? 100 : 140,
-                                            height: isLand ? 100 : 140)
-                                        .background(Circle().fill(Color(hex: "#54c0ff")))
+                                        .frame(width: lensSize,
+                                               height: lensSize)
+                                        .background(Circle().fill(Color.white))
+                                        .overlay(
+                                            Circle().stroke(Color.black, lineWidth: 2)
+                                        )
                                 }
                                 .contentShape(Rectangle())
-                                .disabled(isEditingAnyProject())  // ← NUOVO
+                                .disabled(isEditingAnyProject())
                             }
+                            .frame(width: sideWidth, alignment: .center)
                         }
                     }
+                    .frame(height: pigiaSize)
 
                     // Gestione Progetti & Split Arrows
                     HStack {
@@ -3412,13 +3833,13 @@ struct ContentView: View {
                                     Color.clear
                                 }
                                 .frame(height: isLand ? 45 : 70)
-                                .disabled(isEditingAnyProject())  // ← NUOVO
+                                .disabled(isEditingAnyProject() || homeSearchHasNoResults(isBackup: isBackup))  // ← NUOVO
 
                                 Button(action: cycleProject) {
                                     Color.clear
                                 }
                                 .frame(height: isLand ? 45 : 70)
-                                .disabled(isEditingAnyProject())  // ← NUOVO
+                                .disabled(isEditingAnyProject() || homeSearchHasNoResults(isBackup: isBackup))  // ← NUOVO
                             }
 
                             VStack {
@@ -3461,6 +3882,103 @@ struct ContentView: View {
                     showNoSbatti = false
                 }
             }
+            .onChange(of: homeSearchCurrent) { _, _ in
+                applyHomeSearchIfNeeded(forBackup: false)
+            }
+            .onChange(of: homeSearchBackup) { _, _ in
+                applyHomeSearchIfNeeded(forBackup: true)
+            }
+            .onChange(of: projectManager.currentProject?.id) { _, _ in
+                if showHomeSearch {
+                    applyHomeSearchIfNeeded(forBackup: isCurrentProjectBackup())
+                }
+            }
+        }
+    }
+
+    private func isCurrentProjectBackup() -> Bool {
+        guard let cur = projectManager.currentProject else { return false }
+        return projectManager.backupProjects.contains { $0.id == cur.id }
+    }
+
+    private func homeSearchQuery(forBackup: Bool) -> String {
+        let text = forBackup ? homeSearchBackup : homeSearchCurrent
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isHomeSearchActive(forBackup: Bool) -> Bool {
+        showHomeSearch && !homeSearchQuery(forBackup: forBackup).isEmpty
+    }
+
+    private func matchesHomeSearch(_ project: Project, query: String) -> Bool {
+        if project.name.localizedCaseInsensitiveContains(query) {
+            return true
+        }
+        return project.noteRows.contains {
+            $0.note.localizedCaseInsensitiveContains(query)
+            || $0.giorno.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private func applyCollapsedFilter(_ list: [Project], isBackup: Bool) -> [Project] {
+        guard !projectManager.cycleIncludesCollapsedLabels else { return list }
+        let collapsed = isBackup
+            ? projectManager.collapsedBackupLabelIDs
+            : projectManager.collapsedCurrentLabelIDs
+        return list.filter {
+            $0.labelID == nil || !collapsed.contains($0.labelID!)
+        }
+    }
+
+    private func baseProjectsForSearch(isBackup: Bool) -> [Project] {
+        if isBackup {
+            var list = projectManager.displayedBackupProjects()
+            if let lockedB = projectManager.lockedBackupLabelID {
+                list = list.filter { $0.labelID == lockedB }
+            }
+            return applyCollapsedFilter(list, isBackup: true)
+        } else {
+            var list = projectManager.displayedCurrentProjects()
+            if let lockedC = projectManager.lockedLabelID {
+                list = list.filter { $0.labelID == lockedC }
+            }
+            return applyCollapsedFilter(list, isBackup: false)
+        }
+    }
+
+    private func filteredProjectsForSearch(isBackup: Bool) -> [Project] {
+        let query = homeSearchQuery(forBackup: isBackup)
+        guard !query.isEmpty else { return [] }
+        return baseProjectsForSearch(isBackup: isBackup).filter {
+            matchesHomeSearch($0, query: query)
+        }
+    }
+
+    private func homeSearchHasNoResults(isBackup: Bool) -> Bool {
+        guard isHomeSearchActive(forBackup: isBackup) else { return false }
+        return filteredProjectsForSearch(isBackup: isBackup).isEmpty
+    }
+
+    private func applyHomeSearchIfNeeded(forBackup: Bool) {
+        guard showHomeSearch else { return }
+        guard forBackup == isCurrentProjectBackup() else { return }
+        let query = homeSearchQuery(forBackup: forBackup)
+        guard !query.isEmpty else { return }
+        let results = filteredProjectsForSearch(isBackup: forBackup)
+        guard !results.isEmpty else { return }
+        if let cur = projectManager.currentProject,
+           results.contains(where: { $0.id == cur.id }) {
+            return
+        }
+        projectManager.currentProject = results[0]
+        scrollTrigger = UUID()
+    }
+
+    private func clearHomeSearchText(forBackup: Bool) {
+        if forBackup {
+            homeSearchBackup = ""
+        } else {
+            homeSearchCurrent = ""
         }
     }
 
@@ -3468,22 +3986,44 @@ struct ContentView: View {
         guard let cur = projectManager.currentProject else { return }
         let isBackup = projectManager.backupProjects.contains { $0.id == cur.id }
 
+        if isHomeSearchActive(forBackup: isBackup) {
+            let arr = filteredProjectsForSearch(isBackup: isBackup)
+            if arr.isEmpty { return }
+            if !arr.contains(where: { $0.id == cur.id }) {
+                projectManager.currentProject = arr[0]
+                scrollTrigger = UUID()
+                return
+            }
+            guard let idx = arr.firstIndex(where: { $0.id == cur.id }),
+                  arr.count > 1
+            else { return }
+            projectManager.currentProject = arr[(idx + 1) % arr.count]
+            scrollTrigger = UUID()
+            return
+        }
+
         if isBackup, let lockedB = projectManager.lockedBackupLabelID {
-            let arr = projectManager.backupProjects.filter { $0.labelID == lockedB }
+            let arr = applyCollapsedFilter(
+                projectManager.backupProjects.filter { $0.labelID == lockedB },
+                isBackup: true
+            )
             guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
             projectManager.currentProject = arr[(idx + 1) % arr.count]
             return
         }
         if !isBackup, let lockedC = projectManager.lockedLabelID {
-            let arr = projectManager.projects.filter { $0.labelID == lockedC }
+            let arr = applyCollapsedFilter(
+                projectManager.projects.filter { $0.labelID == lockedC },
+                isBackup: false
+            )
             guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
             projectManager.currentProject = arr[(idx + 1) % arr.count]
             return
         }
 
         let arr = isBackup
-            ? projectManager.displayedBackupProjects()
-            : projectManager.displayedCurrentProjects()
+            ? applyCollapsedFilter(projectManager.displayedBackupProjects(), isBackup: true)
+            : applyCollapsedFilter(projectManager.displayedCurrentProjects(), isBackup: false)
         guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
         projectManager.currentProject = arr[(idx + 1) % arr.count]
         scrollTrigger = UUID()
@@ -3493,22 +4033,44 @@ struct ContentView: View {
         guard let cur = projectManager.currentProject else { return }
         let isBackup = projectManager.backupProjects.contains { $0.id == cur.id }
 
+        if isHomeSearchActive(forBackup: isBackup) {
+            let arr = filteredProjectsForSearch(isBackup: isBackup)
+            if arr.isEmpty { return }
+            if !arr.contains(where: { $0.id == cur.id }) {
+                projectManager.currentProject = arr[0]
+                scrollTrigger = UUID()
+                return
+            }
+            guard let idx = arr.firstIndex(where: { $0.id == cur.id }),
+                  arr.count > 1
+            else { return }
+            projectManager.currentProject = arr[(idx - 1 + arr.count) % arr.count]
+            scrollTrigger = UUID()
+            return
+        }
+
         if isBackup, let lockedB = projectManager.lockedBackupLabelID {
-            let arr = projectManager.backupProjects.filter { $0.labelID == lockedB }
+            let arr = applyCollapsedFilter(
+                projectManager.backupProjects.filter { $0.labelID == lockedB },
+                isBackup: true
+            )
             guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
             projectManager.currentProject = arr[(idx - 1 + arr.count) % arr.count]
             return
         }
         if !isBackup, let lockedC = projectManager.lockedLabelID {
-            let arr = projectManager.projects.filter { $0.labelID == lockedC }
+            let arr = applyCollapsedFilter(
+                projectManager.projects.filter { $0.labelID == lockedC },
+                isBackup: false
+            )
             guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
             projectManager.currentProject = arr[(idx - 1 + arr.count) % arr.count]
             return
         }
 
         let arr = isBackup
-            ? projectManager.displayedBackupProjects()
-            : projectManager.displayedCurrentProjects()
+            ? applyCollapsedFilter(projectManager.displayedBackupProjects(), isBackup: true)
+            : applyCollapsedFilter(projectManager.displayedCurrentProjects(), isBackup: false)
         guard let idx = arr.firstIndex(where: { $0.id == cur.id }), arr.count > 1 else { return }
         projectManager.currentProject = arr[(idx - 1 + arr.count) % arr.count]
         scrollTrigger = UUID()
